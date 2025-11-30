@@ -20,6 +20,8 @@ BASE_TIMEZONE="UTC"
 BASE_LOCALE="en_US.UTF-8"
 BASE_ROOT_PASSWORD=""
 BASE_USER_PASSWORD=""
+BOOT_MODE="uefi"
+BIOS_BOOT_PART=""
 SCRIPT_PATH="$0"
 if command -v realpath >/dev/null 2>&1; then
   SCRIPT_PATH="$(realpath "$0")"
@@ -57,6 +59,50 @@ init_ui() {
       warn "TTY not detected for whiptail; using basic text prompts."
     fi
     UI_MODE="text"
+  fi
+}
+
+detect_current_boot_mode() {
+  if [[ -d /sys/firmware/efi ]]; then
+    echo "uefi"
+  else
+    echo "bios"
+  fi
+}
+
+select_install_boot_mode() {
+  local detected
+  detected=$(detect_current_boot_mode)
+  local prompt="Select boot mode for GRUB installation"
+  local default_choice="$detected"
+  local selection=""
+
+  if [[ $UI_MODE == "whiptail" ]]; then
+    selection=$(whiptail --title "$UI_TITLE" --default-item "$default_choice" --menu "$prompt" 15 70 "$UI_MENU_HEIGHT" \
+      "uefi" "UEFI (GPT + EFI system partition)" \
+      "bios" "Legacy BIOS (GPT + bios_grub partition)" 3>&1 1>&2 2>&3) || ui_cancelled
+  else
+    echo "$prompt"
+    echo "  1) UEFI (recommended when firmware supports it)"
+    echo "  2) Legacy BIOS"
+    local choice
+    while true; do
+      read -r -p "Choice [1-2] (default: $([[ $default_choice == uefi ]] && echo 1 || echo 2)): " choice
+      choice="${choice:-$([[ $default_choice == uefi ]] && echo 1 || echo 2)}"
+      case "$choice" in
+        1) selection="uefi"; break ;;
+        2) selection="bios"; break ;;
+        *) echo "Invalid selection, try again." ;;
+      esac
+    done
+  fi
+
+  BOOT_MODE="$selection"
+  if [[ $BOOT_MODE == "uefi" && $detected != "uefi" ]]; then
+    warn "System was booted in BIOS mode; ensure firmware actually supports UEFI before proceeding."
+  fi
+  if [[ $BOOT_MODE == "bios" && $detected == "uefi" ]]; then
+    warn "Legacy BIOS mode selected even though UEFI is available."
   fi
 }
 
@@ -231,13 +277,9 @@ ensure_local_uefi_packages() {
   fi
 }
 
-configure_uefi_bootloader() {
+run_uefi_bootloader_setup() {
   if [[ ! -d /sys/firmware/efi ]]; then
     warn "System is not currently booted in UEFI mode; skipping GRUB install."
-    return
-  fi
-
-  if ! prompt_yes_no "Install or repair GRUB for UEFI boot now?" "n"; then
     return
   fi
 
@@ -265,10 +307,71 @@ configure_uefi_bootloader() {
   run_root_cmd grub-mkconfig -o /boot/grub/grub.cfg
 }
 
+ensure_local_bios_packages() {
+  if ! pacman -Qi grub >/dev/null 2>&1; then
+    install_packages "Installing GRUB for BIOS systems..." grub
+  fi
+}
+
+select_bootloader_mode_choice() {
+  local prompt="$1"
+  local detected
+  detected=$(detect_current_boot_mode)
+  local default_choice="$detected"
+  local selection
+
+  if [[ $UI_MODE == "whiptail" ]]; then
+    selection=$(whiptail --title "$UI_TITLE" --default-item "$default_choice" --menu "$prompt" 15 70 "$UI_MENU_HEIGHT" \
+      "uefi" "UEFI system" \
+      "bios" "Legacy BIOS" 3>&1 1>&2 2>&3) || ui_cancelled
+  else
+    echo "$prompt"
+    echo "  1) UEFI"
+    echo "  2) Legacy BIOS"
+    local choice
+    while true; do
+      read -r -p "Choice [1-2] (default: $([[ $default_choice == uefi ]] && echo 1 || echo 2)): " choice
+      choice="${choice:-$([[ $default_choice == uefi ]] && echo 1 || echo 2)}"
+      case "$choice" in
+        1) selection="uefi"; break ;;
+        2) selection="bios"; break ;;
+        *) echo "Invalid selection, try again." ;;
+      esac
+    done
+  fi
+
+  printf '%s' "$selection"
+}
+
+run_bios_bootloader_setup() {
+  ensure_local_bios_packages
+  local boot_disk
+  boot_disk=$(prompt_disk_selection "Select disk for BIOS GRUB install")
+  log "Running grub-install for legacy BIOS on $boot_disk..."
+  if ! run_root_cmd grub-install --target=i386-pc "$boot_disk"; then
+    err "grub-install failed for BIOS mode; please inspect disk state and retry."
+    return
+  fi
+  log "Generating GRUB configuration..."
+  run_root_cmd grub-mkconfig -o /boot/grub/grub.cfg
+}
+
+configure_bootloader_postinstall() {
+  if ! prompt_yes_no "Install or repair a bootloader now?" "n"; then
+    return
+  fi
+  local mode
+  mode=$(select_bootloader_mode_choice "Select bootloader target mode")
+  case "$mode" in
+    uefi) run_uefi_bootloader_setup ;;
+    bios) run_bios_bootloader_setup ;;
+  esac
+}
+
 select_run_mode() {
   local labels=(
     "Post-install gaming setup (existing Arch system)"
-    "Full Arch install (UEFI, single disk)"
+    "Full Arch install (UEFI or BIOS, single disk)"
   )
   local values=(postinstall fullinstall)
 
@@ -307,9 +410,9 @@ check_base_install_prereqs() {
   for cmd in "${required[@]}"; do
     require_command "$cmd" "Required command '$cmd' not found in live environment."
   done
-  if [[ ! -d /sys/firmware/efi ]]; then
-    warn "UEFI firmware interface not detected; script assumes UEFI."
-  fi
+  local detected
+  detected=$(detect_current_boot_mode)
+  log "Live environment boot mode detected: ${detected^^}."
 }
 
 prompt_hostname() {
@@ -368,7 +471,54 @@ prompt_password() {
   done
 }
 
-select_install_disk() {
+select_existing_user() {
+  local -a user_entries=()
+  while IFS=: read -r name _ uid _ home _; do
+    if ((uid >= 1000)) && [[ -d "$home" ]]; then
+      user_entries+=("$name:$home")
+    fi
+  done < <(getent passwd)
+
+  if [[ ${#user_entries[@]} -eq 0 ]]; then
+    err "No regular users detected to grant sudo access."
+    return 1
+  fi
+
+  if [[ $UI_MODE == "whiptail" ]]; then
+    local menu_entries=()
+    for entry in "${user_entries[@]}"; do
+      local name="${entry%%:*}"
+      local home="${entry#*:}"
+      menu_entries+=("$name" "$home")
+    done
+    local selection
+    selection=$(whiptail --title "$UI_TITLE" --menu "Select user to grant sudo" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
+    printf '%s' "$selection"
+    return
+  fi
+
+  echo "Available users:"
+  for i in "${!user_entries[@]}"; do
+    local entry="${user_entries[i]}"
+    local name="${entry%%:*}"
+    local home="${entry#*:}"
+    printf '  %d) %s (%s)\n' "$((i + 1))" "$name" "$home"
+  done
+
+  local choice
+  while true; do
+    read -r -p "Select user [1-${#user_entries[@]}]: " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#user_entries[@]})); then
+      printf '%s' "${user_entries[choice-1]%%:*}"
+      return
+    fi
+    echo "Invalid selection, try again."
+  done
+}
+
+prompt_disk_selection() {
+  local prompt="$1"
+  local -a disk_entries=()
   mapfile -t disk_entries < <(lsblk -dpno NAME,SIZE,TYPE | awk '$3=="disk" {print $1" "$2}')
   if [[ ${#disk_entries[@]} -eq 0 ]]; then
     err "No disks detected."
@@ -382,7 +532,9 @@ select_install_disk() {
       local size="${entry#* }"
       menu_entries+=("$name" "$size")
     done
-    BASE_DISK=$(whiptail --title "$UI_TITLE" --menu "Select target disk (all data will be wiped)" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
+    local selection
+    selection=$(whiptail --title "$UI_TITLE" --menu "$prompt" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
+    printf '%s' "$selection"
     return
   fi
 
@@ -397,13 +549,17 @@ select_install_disk() {
 
   local choice
   while true; do
-    read -r -p "Select target disk [1-${#disk_entries[@]}]: " choice
+    read -r -p "$prompt [1-${#disk_entries[@]}]: " choice
     if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#disk_entries[@]})); then
-      BASE_DISK="${disk_entries[choice-1]%% *}"
-      break
+      printf '%s' "${disk_entries[choice-1]%% *}"
+      return
     fi
     echo "Invalid selection, try again."
   done
+}
+
+select_install_disk() {
+  BASE_DISK=$(prompt_disk_selection "Select target disk (all data will be wiped)")
 }
 
 confirm_disk_wipe() {
@@ -418,40 +574,104 @@ set_partition_paths() {
   if [[ $BASE_DISK == *"nvme"* || $BASE_DISK == *"mmcblk"* || $BASE_DISK == *"loop"* ]]; then
     suffix="p"
   fi
-  EFI_PART="${BASE_DISK}${suffix}1"
-  ROOT_PART="${BASE_DISK}${suffix}2"
+  if [[ $BOOT_MODE == "uefi" ]]; then
+    EFI_PART="${BASE_DISK}${suffix}1"
+    ROOT_PART="${BASE_DISK}${suffix}2"
+    BIOS_BOOT_PART=""
+  else
+    BIOS_BOOT_PART="${BASE_DISK}${suffix}1"
+    ROOT_PART="${BASE_DISK}${suffix}2"
+    EFI_PART=""
+  fi
 }
 
 partition_disk() {
-  log "Partitioning $BASE_DISK (UEFI: 512MiB EFI + rest root)..."
   sgdisk --zap-all "$BASE_DISK"
-  sgdisk -n1:0:+512M -t1:ef00 -c1:"EFI System" "$BASE_DISK"
-  sgdisk -n2:0:0 -t2:8300 -c2:"Linux Root" "$BASE_DISK"
+  if [[ $BOOT_MODE == "uefi" ]]; then
+    log "Partitioning $BASE_DISK (UEFI: 512MiB EFI + rest root)..."
+    sgdisk -n1:0:+512M -t1:ef00 -c1:"EFI System" "$BASE_DISK"
+    sgdisk -n2:0:0 -t2:8300 -c2:"Linux Root" "$BASE_DISK"
+  else
+    log "Partitioning $BASE_DISK (BIOS: 1MiB bios_grub + rest root)..."
+    sgdisk -a1 -n1:34:2047 -t1:ef02 -c1:"BIOS Boot" "$BASE_DISK"
+    sgdisk -n2:0:0 -t2:8300 -c2:"Linux Root" "$BASE_DISK"
+  fi
   partprobe "$BASE_DISK"
 }
 
 format_and_mount_partitions() {
-  log "Formatting $EFI_PART as FAT32 and $ROOT_PART as ext4..."
-  mkfs.fat -F32 "$EFI_PART"
-  mkfs.ext4 -F "$ROOT_PART"
-  log "Mounting root at $MOUNTPOINT and EFI at $MOUNTPOINT/boot..."
   mkdir -p "$MOUNTPOINT"
-  mount "$ROOT_PART" "$MOUNTPOINT"
-  mkdir -p "$MOUNTPOINT/boot"
-  mount "$EFI_PART" "$MOUNTPOINT/boot"
+  if [[ $BOOT_MODE == "uefi" ]]; then
+    log "Formatting $EFI_PART as FAT32 and $ROOT_PART as ext4..."
+    mkfs.fat -F32 "$EFI_PART"
+    mkfs.ext4 -F "$ROOT_PART"
+    log "Mounting root at $MOUNTPOINT and EFI at $MOUNTPOINT/boot..."
+    mount "$ROOT_PART" "$MOUNTPOINT"
+    mkdir -p "$MOUNTPOINT/boot"
+    mount "$EFI_PART" "$MOUNTPOINT/boot"
+  else
+    log "Formatting $ROOT_PART as ext4 (BIOS mode)..."
+    mkfs.ext4 -F "$ROOT_PART"
+    log "Mounting root at $MOUNTPOINT..."
+    mount "$ROOT_PART" "$MOUNTPOINT"
+  fi
 }
 
 pacstrap_base_system() {
-  local base_packages=(base linux linux-firmware networkmanager sudo grub efibootmgr)
+  local base_packages=(base linux linux-firmware networkmanager sudo grub)
+  if [[ $BOOT_MODE == "uefi" ]]; then
+    base_packages+=(efibootmgr)
+  fi
   log "Installing base system with pacstrap..."
   pacstrap -K "$MOUNTPOINT" "${base_packages[@]}"
   genfstab -U "$MOUNTPOINT" >>"$MOUNTPOINT/etc/fstab"
 }
 
 install_optional_fwupd_in_chroot() {
+  if [[ $BOOT_MODE != "uefi" ]]; then
+    return
+  fi
   if prompt_yes_no "Install fwupd in the new system for firmware updates?" "y"; then
     arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm fwupd
   fi
+}
+
+install_bootloader_in_chroot() {
+  log "Installing and configuring GRUB bootloader..."
+  if [[ $BOOT_MODE == "uefi" ]]; then
+    arch-chroot "$MOUNTPOINT" grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ArchLinux --recheck
+  else
+    arch-chroot "$MOUNTPOINT" grub-install --target=i386-pc "$BASE_DISK"
+  fi
+  arch-chroot "$MOUNTPOINT" grub-mkconfig -o /boot/grub/grub.cfg
+}
+
+ensure_wheel_sudoers() {
+  local sudoers="/etc/sudoers"
+  if run_root_cmd grep -Eq '^[[:space:]]*%wheel[[:space:]]*ALL=\(ALL(:ALL)?\)[[:space:]]*ALL' "$sudoers"; then
+    return
+  fi
+  local backup="${sudoers}.bak.$(date +%Y%m%d%H%M%S)"
+  run_root_cmd cp "$sudoers" "$backup"
+  if run_root_cmd grep -Eq '^[[:space:]]*#[[:space:]]*%wheel[[:space:]]*ALL=\(ALL(:ALL)?\)[[:space:]]*ALL' "$sudoers"; then
+    run_root_cmd sed -i 's/^[[:space:]]*#[[:space:]]*\(%wheel ALL=(ALL:ALL) ALL\)/\1/' "$sudoers"
+  else
+    printf '\n%%wheel ALL=(ALL:ALL) ALL\n' | run_root_cmd tee -a "$sudoers" >/dev/null
+  fi
+}
+
+grant_sudo_privileges() {
+  if ! prompt_yes_no "Grant sudo privileges to an existing user?" "n"; then
+    return
+  fi
+  local username
+  if ! username=$(select_existing_user); then
+    return
+  fi
+  log "Adding $username to wheel group..."
+  run_root_cmd usermod -aG wheel "$username"
+  ensure_wheel_sudoers
+  log "User $username now has sudo access via wheel group."
 }
 
 configure_system_in_chroot() {
@@ -493,9 +713,7 @@ EOF
   log "Enabling NetworkManager..."
   arch-chroot "$MOUNTPOINT" systemctl enable NetworkManager.service
 
-  log "Installing and configuring GRUB bootloader..."
-  arch-chroot "$MOUNTPOINT" grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ArchLinux --recheck
-  arch-chroot "$MOUNTPOINT" grub-mkconfig -o /boot/grub/grub.cfg
+  install_bootloader_in_chroot
 }
 
 copy_script_to_new_install() {
@@ -520,6 +738,7 @@ run_full_arch_install() {
   prompt_hostname
   prompt_timezone
   prompt_locale
+  select_install_boot_mode
   select_install_disk
   confirm_disk_wipe
   set_partition_paths
@@ -875,7 +1094,7 @@ EOF
   if prompt_yes_no "Install/verify UEFI tooling (grub, efibootmgr, fwupd)?" "y"; then
     ensure_local_uefi_packages
   fi
-  configure_uefi_bootloader
+  configure_bootloader_postinstall
   if prompt_yes_no "Enable multilib repo?" "y"; then
     enable_multilib
   fi
@@ -895,6 +1114,7 @@ EOF
   else
     warn "Skipping optional Heroic/ProtonUp install because AUR support is disabled."
   fi
+  grant_sudo_privileges
   post_install_summary
 }
 
