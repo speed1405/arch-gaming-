@@ -147,9 +147,12 @@ prompt_yes_no() {
   local prompt="$1"
   local default="${2:-y}"
   if [[ $UI_MODE == "whiptail" ]]; then
-    local default_flag="--defaultno"
-    [[ ${default,,} == y* ]] && default_flag="--defaultyes"
-    if whiptail --title "$UI_TITLE" --yesno "$prompt" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH" $default_flag; then
+    local -a cmd=(whiptail --title "$UI_TITLE")
+    if [[ ${default,,} != y* ]]; then
+      cmd+=(--defaultno)
+    fi
+    cmd+=(--yesno "$prompt" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH")
+    if "${cmd[@]}"; then
       return 0
     else
       return 1
