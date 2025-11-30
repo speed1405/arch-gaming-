@@ -35,6 +35,55 @@ UI_TITLE="Arch AMD Gaming Setup"
 UI_BOX_HEIGHT=12
 UI_BOX_WIDTH=70
 UI_MENU_HEIGHT=10
+FORCED_RUN_MODE=""
+
+print_usage() {
+  cat <<'EOF'
+Arch AMD Gaming Setup
+
+Usage: ./arch-amd-gaming-setup.sh [--mode postinstall|fullinstall]
+  --mode postinstall   Force post-install flow (skip auto-detection)
+  --mode fullinstall   Force full disk install (requires root on live ISO)
+  -h, --help           Show this help message
+EOF
+}
+
+parse_cli_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --mode)
+        if [[ $# -lt 2 ]]; then
+          err "--mode requires an argument"
+          exit 1
+        fi
+        FORCED_RUN_MODE="$2"
+        shift 2
+        ;;
+      --mode=*)
+        FORCED_RUN_MODE="${1#*=}"
+        shift
+        ;;
+      -h|--help)
+        print_usage
+        exit 0
+        ;;
+      *)
+        warn "Unknown argument: $1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -n "$FORCED_RUN_MODE" ]]; then
+    case "$FORCED_RUN_MODE" in
+      fullinstall|postinstall) ;;
+      *)
+        err "Invalid --mode value '$FORCED_RUN_MODE'. Use 'fullinstall' or 'postinstall'."
+        exit 1
+        ;;
+    esac
+  fi
+}
 
 log() {
   printf '[+] %s\n' "$1"
@@ -389,36 +438,18 @@ configure_bootloader_postinstall() {
 }
 
 select_run_mode() {
-  local labels=(
-    "Post-install gaming setup (existing Arch system)"
-    "Full Arch install (UEFI or BIOS, single disk)"
-  )
-  local values=(postinstall fullinstall)
-
-  if [[ $UI_MODE == "whiptail" ]]; then
-    local menu_entries=()
-    for i in "${!values[@]}"; do
-      menu_entries+=("${values[i]}" "${labels[i]}")
-    done
-    local selection
-    selection=$(whiptail --title "$UI_TITLE" --menu "Select operating mode" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
-    RUN_MODE="$selection"
+  if [[ -n "$FORCED_RUN_MODE" ]]; then
+    RUN_MODE="$FORCED_RUN_MODE"
+    log "Using forced mode: $RUN_MODE"
     return
   fi
 
-  echo "Select operating mode:"
-  for i in "${!labels[@]}"; do
-    printf '  %d) %s\n' "$((i + 1))" "${labels[i]}"
-  done
-  while true; do
-    read -r -p "Mode [1-${#labels[@]}] (default: 1): " choice
-    choice="${choice:-1}"
-    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#labels[@]})); then
-      RUN_MODE="${values[choice-1]}"
-      break
-    fi
-    echo "Invalid selection, try again."
-  done
+  if [[ $EUID -eq 0 ]]; then
+    RUN_MODE="fullinstall"
+  else
+    RUN_MODE="postinstall"
+  fi
+  log "Auto-detected run mode: $RUN_MODE"
 }
 
 check_base_install_prereqs() {
@@ -902,6 +933,23 @@ copy_script_to_new_install() {
   log "Script copied to $target_path"
 }
 
+run_post_install_inside_target() {
+  local user_script="/home/$BASE_USERNAME/arch-amd-gaming-setup.sh"
+  if [[ ! -f "$MOUNTPOINT$user_script" ]]; then
+    warn "Post-install script not found at $user_script; skipping automatic configuration."
+    return
+  fi
+
+  log "Launching post-install configuration inside the new system..."
+  local inner_script="./$(basename "$user_script")"
+  local chroot_cmd="cd /home/$BASE_USERNAME && $inner_script --mode postinstall"
+  if ! arch-chroot "$MOUNTPOINT" runuser -l "$BASE_USERNAME" -c "$chroot_cmd"; then
+    warn "Post-install phase inside target system exited with an error. You can rerun $user_script after reboot."
+  else
+    log "Post-install configuration inside target system completed."
+  fi
+}
+
 cleanup_mounts() {
   if mountpoint -q "$MOUNTPOINT/boot" 2>/dev/null; then
     umount "$MOUNTPOINT/boot"
@@ -929,16 +977,17 @@ run_full_arch_install() {
   install_optional_fwupd_in_chroot
   configure_system_in_chroot
   copy_script_to_new_install
+  run_post_install_inside_target
   cleanup_mounts
   trap - EXIT
 
   cat <<'EOF'
 
-Base installation complete!
+Installation complete!
 Next steps:
   • Reboot into the new system.
-  • Log in as the user you created.
-  • Re-run this script (already copied to ~/arch-amd-gaming-setup.sh) and choose "Post-install" to set up AMD gaming packages.
+  • Log in and enjoy your configured desktop + gaming stack.
+  • Re-run ~/arch-amd-gaming-setup.sh later if you want to tweak settings again.
 EOF
 }
 
@@ -1318,6 +1367,7 @@ EOF
 }
 
 main() {
+  parse_cli_args "$@"
   init_ui
   select_run_mode
   if [[ $RUN_MODE == "fullinstall" ]]; then
