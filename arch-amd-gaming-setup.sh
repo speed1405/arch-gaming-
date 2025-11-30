@@ -11,6 +11,8 @@ ENABLE_AUR=0
 OPTIMIZE_MIRRORS=0
 INSTALL_GAMING=1
 SWAPFILE_PATH="/swapfile"
+DEFAULT_GAMING_COMPONENTS=(steam lutris wine gamemode mangohud pipewire openxr dxvk)
+GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
 RUN_MODE="postinstall"
 MOUNTPOINT="/mnt"
 BASE_DISK=""
@@ -534,26 +536,106 @@ select_existing_user() {
   done
 }
 
-prompt_gaming_packages() {
-  if prompt_yes_no "Install the full gaming package stack (Steam, Lutris, Wine, etc.)?" "y"; then
-    INSTALL_GAMING=1
+select_gaming_components() {
+  local -a selections=("${GAMING_COMPONENTS_SELECTED[@]}")
+  if [[ $UI_MODE == "whiptail" ]]; then
+    local checklist=()
+    for option in steam lutris wine gamemode mangohud pipewire openxr dxvk; do
+      local desc=""
+      case "$option" in
+        steam) desc="Steam client + runtime" ;;
+        lutris) desc="Lutris launcher" ;;
+        wine) desc="Wine + helpers" ;;
+        gamemode) desc="Feral gamemode service" ;;
+        mangohud) desc="MangoHud overlay + GOverlay" ;;
+        pipewire) desc="PipeWire audio stack" ;;
+        openxr) desc="OpenXR + Vulkan tools" ;;
+        dxvk) desc="DXVK binaries (needs multilib)" ;;
+      esac
+      local state="off"
+      for sel in "${GAMING_COMPONENTS_SELECTED[@]}"; do
+        if [[ $sel == "$option" ]]; then
+          state="on"
+          break
+        fi
+      done
+      checklist+=("$option" "$desc" "$state")
+    done
+    local result
+    result=$(whiptail --title "$UI_TITLE" --checklist "Select gaming components to install" 20 80 10 "${checklist[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
+    result="${result//\"/}"
+    read -r -a selections <<<"$result"
   else
-    INSTALL_GAMING=0
+    echo "Select gaming components to install (comma-separated). Options:"
+    echo "  steam, lutris, wine, gamemode, mangohud, pipewire, openxr, dxvk"
+    local default_input
+    default_input=$(IFS=, ; echo "${GAMING_COMPONENTS_SELECTED[*]}")
+    local input
+    read -r -p "Selection (default: $default_input): " input
+    input="${input:-$default_input}"
+    IFS=',' read -ra selections <<<"$input"
+    for i in "${!selections[@]}"; do
+      local trimmed="${selections[i]}"
+      trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
+      trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+      selections[i]="${trimmed,,}"
+    done
   fi
+
+  local -a filtered=()
+  for sel in "${selections[@]}"; do
+    case "$sel" in
+      steam|lutris|wine|gamemode|mangohud|pipewire|openxr|dxvk)
+        filtered+=("$sel")
+        ;;
+    esac
+  done
+  GAMING_COMPONENTS_SELECTED=("${filtered[@]}")
 }
 
-prompt_disk_selection() {
-  local prompt="$1"
-  local -a disk_entries=()
-  mapfile -t disk_entries < <(lsblk -dpno NAME,SIZE,TYPE | awk '$3=="disk" {print $1" "$2}')
-  if [[ ${#disk_entries[@]} -eq 0 ]]; then
-    err "No disks detected."
-    exit 1
+install_gaming_packages() {
+  if [[ ${#GAMING_COMPONENTS_SELECTED[@]} -eq 0 ]]; then
+    warn "No gaming components selected; skipping package installation."
+    return
   fi
 
-  if [[ $UI_MODE == "whiptail" ]]; then
-    local menu_entries=()
-    for entry in "${disk_entries[@]}"; do
+  local -a packages=()
+  for component in "${GAMING_COMPONENTS_SELECTED[@]}"; do
+    case "$component" in
+      steam) packages+=(steam steam-native-runtime) ;;
+      lutris) packages+=(lutris) ;;
+      wine) packages+=(wine wine-mono wine-gecko) ;;
+      gamemode) packages+=(gamemode) ;;
+      mangohud) packages+=(mangohud goverlay) ;;
+      pipewire) packages+=(pipewire pipewire-alsa pipewire-pulse pipewire-jack qpwgraph) ;;
+      openxr) packages+=(openxr-loader vulkan-tools) ;;
+      dxvk)
+        if [[ $MULTILIB_ENABLED -eq 1 ]]; then
+          packages+=(dxvk-bin)
+        else
+          warn "Skipping DXVK because multilib is disabled."
+        fi
+        ;;
+    esac
+  done
+
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    warn "No installable gaming packages detected after filtering."
+    return
+  fi
+
+  local -a deduped=()
+  declare -A seen=()
+  local pkg
+  for pkg in "${packages[@]}"; do
+    if [[ -n "$pkg" && -z ${seen[$pkg]+x} ]]; then
+      deduped+=("$pkg")
+      seen[$pkg]=1
+    fi
+  done
+
+  install_packages "Installing selected gaming packages..." "${deduped[@]}"
+}
       local name="${entry%% *}"
       local size="${entry#* }"
       menu_entries+=("$name" "$size")
@@ -1195,7 +1277,7 @@ EOF
   install_amd_stack
   select_desktop_environment
   install_desktop_environment
-  prompt_gaming_packages
+  configure_gaming_packages
   if [[ $INSTALL_GAMING -eq 1 ]]; then
     if ensure_multilib_for_gaming; then
       install_gaming_packages
