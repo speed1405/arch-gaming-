@@ -636,8 +636,22 @@ install_gaming_packages() {
 
   install_packages "Installing selected gaming packages..." "${deduped[@]}"
 }
-      local name="${entry%% *}"
-      local size="${entry#* }"
+
+prompt_disk_selection() {
+  local prompt="$1"
+  local -a disk_entries=()
+  mapfile -t disk_entries < <(lsblk -dpno NAME,SIZE,TYPE | awk '$3=="disk" {print $1" "$2}')
+  if [[ ${#disk_entries[@]} -eq 0 ]]; then
+    err "No disks detected."
+    exit 1
+  fi
+
+  if [[ $UI_MODE == "whiptail" ]]; then
+    local menu_entries=()
+    local entry name size
+    for entry in "${disk_entries[@]}"; do
+      name="${entry%% *}"
+      size="${entry#* }"
       menu_entries+=("$name" "$size")
     done
     local selection
@@ -647,8 +661,8 @@ install_gaming_packages() {
   fi
 
   echo "Available disks:"
+  local i entry name size
   for i in "${!disk_entries[@]}"; do
-    local entry name size
     entry="${disk_entries[i]}"
     name="${entry%% *}"
     size="${entry#* }"
