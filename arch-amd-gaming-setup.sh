@@ -218,6 +218,53 @@ optimize_mirrors() {
   log "Mirrorlist updated."
 }
 
+ensure_local_uefi_packages() {
+  local packages=(grub efibootmgr fwupd)
+  local missing=()
+  for pkg in "${packages[@]}"; do
+    if ! pacman -Qi "$pkg" >/dev/null 2>&1; then
+      missing+=("$pkg")
+    fi
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    install_packages "Installing UEFI tooling (${missing[*]})..." "${missing[@]}"
+  fi
+}
+
+configure_uefi_bootloader() {
+  if [[ ! -d /sys/firmware/efi ]]; then
+    warn "System is not currently booted in UEFI mode; skipping GRUB install."
+    return
+  fi
+
+  if ! prompt_yes_no "Install or repair GRUB for UEFI boot now?" "n"; then
+    return
+  fi
+
+  ensure_local_uefi_packages
+  local default_mount="/boot"
+  [[ -d /boot/efi ]] && default_mount="/boot/efi"
+  local efi_mount
+  efi_mount=$(prompt_text_input "EFI system partition mount point" "$default_mount")
+  if [[ -z "$efi_mount" || ! -d "$efi_mount" ]]; then
+    warn "EFI mount point '$efi_mount' not found. Ensure it is created and mounted, then re-run this step."
+    return
+  fi
+
+  if ! mountpoint -q "$efi_mount"; then
+    warn "EFI mount point $efi_mount is not mounted; GRUB install may fail. Mount it and re-run."
+    return
+  fi
+
+  log "Running grub-install for target x86_64-efi..."
+  if ! run_root_cmd grub-install --target=x86_64-efi --efi-directory="$efi_mount" --bootloader-id=ArchLinux --recheck; then
+    err "grub-install failed; please check the EFI partition and rerun."
+    return
+  fi
+  log "Generating GRUB configuration..."
+  run_root_cmd grub-mkconfig -o /boot/grub/grub.cfg
+}
+
 select_run_mode() {
   local labels=(
     "Post-install gaming setup (existing Arch system)"
@@ -401,6 +448,12 @@ pacstrap_base_system() {
   genfstab -U "$MOUNTPOINT" >>"$MOUNTPOINT/etc/fstab"
 }
 
+install_optional_fwupd_in_chroot() {
+  if prompt_yes_no "Install fwupd in the new system for firmware updates?" "y"; then
+    arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm fwupd
+  fi
+}
+
 configure_system_in_chroot() {
   log "Configuring timezone, locale, and hostname..."
   if [[ -f "/usr/share/zoneinfo/$BASE_TIMEZONE" ]]; then
@@ -475,6 +528,7 @@ run_full_arch_install() {
   partition_disk
   format_and_mount_partitions
   pacstrap_base_system
+  install_optional_fwupd_in_chroot
   configure_system_in_chroot
   copy_script_to_new_install
   cleanup_mounts
@@ -818,6 +872,10 @@ EOF
 
   optimize_mirrors
   update_system
+  if prompt_yes_no "Install/verify UEFI tooling (grub, efibootmgr, fwupd)?" "y"; then
+    ensure_local_uefi_packages
+  fi
+  configure_uefi_bootloader
   if prompt_yes_no "Enable multilib repo?" "y"; then
     enable_multilib
   fi
