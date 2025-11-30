@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# ================================================================
+# Global Configuration & Defaults
+# ================================================================
+
 PACMAN_FLAGS=(--needed --noconfirm)
 AUR_FLAGS=(--needed --noconfirm)
 AUR_HELPER=""
 AUR_HELPER_SELECTION="paru"
+AUR_KERNEL_SELECTION="linux-amd-znver3"
 MULTILIB_ENABLED=0
 DESKTOP_CHOICE="skip"
 ENABLE_AUR=0
@@ -36,6 +41,10 @@ UI_BOX_HEIGHT=12
 UI_BOX_WIDTH=70
 UI_MENU_HEIGHT=10
 FORCED_RUN_MODE=""
+
+# ================================================================
+# CLI Argument Parsing & Environment Detection
+# ================================================================
 
 print_usage() {
   cat <<'EOF'
@@ -85,6 +94,26 @@ parse_cli_args() {
   fi
 }
 
+detect_timezone_default() {
+  local detected=""
+  if command -v timedatectl >/dev/null 2>&1; then
+    detected=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+  fi
+  if [[ -z "$detected" && -L /etc/localtime ]]; then
+    detected=$(readlink -f /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')
+  fi
+  if [[ -z "$detected" && -f /etc/timezone ]]; then
+    detected=$(< /etc/timezone)
+  fi
+  if [[ -n "$detected" ]]; then
+    BASE_TIMEZONE="$detected"
+  fi
+}
+
+# ================================================================
+# Logging, UI Initialization & Prompt Helpers
+# ================================================================
+
 log() {
   printf '[+] %s\n' "$1"
 }
@@ -97,125 +126,67 @@ err() {
   printf '[x] %s\n' "$1" >&2
 }
 
-ui_cancelled() {
-  err "Operation cancelled by user."
-  exit 1
-}
-
-init_ui() {
-  if command -v whiptail >/dev/null 2>&1 && [[ -t 1 ]]; then
-    UI_MODE="whiptail"
-  else
-    if ! command -v whiptail >/dev/null 2>&1; then
-      warn "whiptail not found; falling back to basic text prompts."
-    else
-      warn "TTY not detected for whiptail; using basic text prompts."
-    fi
-    UI_MODE="text"
-  fi
-}
-
-detect_current_boot_mode() {
-  if [[ -d /sys/firmware/efi ]]; then
-    echo "uefi"
-  else
-    echo "bios"
-  fi
-}
-
-select_install_boot_mode() {
-  local detected
-  detected=$(detect_current_boot_mode)
-  local prompt="Select boot mode for GRUB installation"
-  local default_choice="$detected"
-  local selection=""
-
-  if [[ $UI_MODE == "whiptail" ]]; then
-    selection=$(whiptail --title "$UI_TITLE" --default-item "$default_choice" --menu "$prompt" 15 70 "$UI_MENU_HEIGHT" \
-      "uefi" "UEFI (GPT + EFI system partition)" \
-      "bios" "Legacy BIOS (GPT + bios_grub partition)" 3>&1 1>&2 2>&3) || ui_cancelled
-  else
-    echo "$prompt"
-    echo "  1) UEFI (recommended when firmware supports it)"
-    echo "  2) Legacy BIOS"
-    local choice
-    while true; do
-      read -r -p "Choice [1-2] (default: $([[ $default_choice == uefi ]] && echo 1 || echo 2)): " choice
-      choice="${choice:-$([[ $default_choice == uefi ]] && echo 1 || echo 2)}"
-      case "$choice" in
-        1) selection="uefi"; break ;;
-        2) selection="bios"; break ;;
-        *) echo "Invalid selection, try again." ;;
+select_gaming_components() {
+  local -a selections=("${GAMING_COMPONENTS_SELECTED[@]}")
+  if [[ $UI_MODE == "dialog" ]]; then
+    local options=(steam lutris wine gamemode mangohud pipewire openxr dxvk)
+    local checklist=()
+    for option in "${options[@]}"; do
+      local desc=""
+      case "$option" in
+        steam) desc="Steam client + runtime" ;;
+        lutris) desc="Lutris launcher" ;;
+        wine) desc="Wine + helpers" ;;
+        gamemode) desc="Feral gamemode service" ;;
+        mangohud) desc="MangoHud overlay + GOverlay" ;;
+        pipewire) desc="PipeWire audio stack" ;;
+        openxr) desc="OpenXR + Vulkan tools" ;;
+        dxvk) desc="DXVK binaries (needs multilib)" ;;
       esac
+      local state="off"
+      for sel in "${GAMING_COMPONENTS_SELECTED[@]}"; do
+        if [[ $sel == "$option" ]]; then
+          state="on"
+          break
+        fi
+      done
+      checklist+=("$option" "$desc" "$state")
+    done
+    local result
+    result=$(dialog --title "$UI_TITLE" --checklist "Select gaming components to install" 20 80 10 "${checklist[@]}" --separate-output --stdout) || ui_cancelled
+    mapfile -t selections <<<"$result"
+  else
+    echo "Select gaming components to install (comma-separated). Options:"
+    echo "  steam, lutris, wine, gamemode, mangohud, pipewire, openxr, dxvk"
+    local default_input
+    default_input=$(IFS=, ; echo "${GAMING_COMPONENTS_SELECTED[*]}")
+    local input
+    read -r -p "Selection (default: $default_input): " input
+    input="${input:-$default_input}"
+    IFS=',' read -ra selections <<<"$input"
+    for i in "${!selections[@]}"; do
+      local trimmed="${selections[i]}"
+      trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
+      trimmed="${trimmed%${trimmed##*[![:space:]]}}"
+      selections[i]="${trimmed,,}"
     done
   fi
 
-  BOOT_MODE="$selection"
-  if [[ $BOOT_MODE == "uefi" && $detected != "uefi" ]]; then
-    warn "System was booted in BIOS mode; ensure firmware actually supports UEFI before proceeding."
-  fi
+  local -a filtered=()
+  for sel in "${selections[@]}"; do
+    case "$sel" in
+      steam|lutris|wine|gamemode|mangohud|pipewire|openxr|dxvk)
+        filtered+=("$sel")
+        ;;
+    esac
+  done
+  GAMING_COMPONENTS_SELECTED=("${filtered[@]}")
+}
   if [[ $BOOT_MODE == "bios" && $detected == "uefi" ]]; then
     warn "Legacy BIOS mode selected even though UEFI is available."
   fi
 }
 
-prompt_text_input() {
-  local prompt="$1"
-  local default_value="${2-}"
-  local result=""
-  if [[ $UI_MODE == "whiptail" ]]; then
-    result=$(whiptail --title "$UI_TITLE" --inputbox "$prompt" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH" "$default_value" 3>&1 1>&2 2>&3) || ui_cancelled
-  else
-    if [[ -n "$default_value" ]]; then
-      read -r -p "$prompt (default: $default_value): " result
-      result="${result:-$default_value}"
-    else
-      read -r -p "$prompt: " result
-    fi
-  fi
-  printf '%s' "$result"
-}
-
-prompt_secret_input() {
-  local prompt="$1"
-  local result=""
-  if [[ $UI_MODE == "whiptail" ]]; then
-    result=$(whiptail --title "$UI_TITLE" --passwordbox "$prompt" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH" 3>&1 1>&2 2>&3) || ui_cancelled
-  else
-    read -rs -p "$prompt" result
-    echo
-  fi
-  printf '%s' "$result"
-}
-
-run_root_cmd() {
-  if [[ $EUID -eq 0 ]]; then
-    "$@"
-  else
-    sudo "$@"
-  fi
-}
-
-prompt_yes_no() {
-  local prompt="$1"
-  local default="${2:-y}"
-  if [[ $UI_MODE == "whiptail" ]]; then
-    local -a cmd=(whiptail --title "$UI_TITLE")
-    if [[ ${default,,} != y* ]]; then
-      cmd+=(--defaultno)
-    fi
-    cmd+=(--yesno "$prompt" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH")
-    if "${cmd[@]}"; then
-      return 0
-    else
-      return 1
-    fi
-  fi
-
-  local answer
-  while true; do
-    read -r -p "$prompt [y/n] (default: $default): " answer
-    answer="${answer:-$default}"
     case "${answer,,}" in
       y|yes) return 0 ;;
       n|no) return 1 ;;
@@ -233,63 +204,10 @@ require_command() {
   fi
 }
 
-install_packages() {
-  local message="$1"
-  shift
-  local packages=("$@")
-  log "$message"
-  run_root_cmd pacman -S "${PACMAN_FLAGS[@]}" "${packages[@]}"
-}
+# ================================================================
+# Package Management & System Preparation
+# ================================================================
 
-check_prereqs() {
-  if [[ $EUID -eq 0 ]]; then
-    err "Run this script as a regular user with sudo rights."
-    exit 1
-  fi
-  require_command sudo "This script needs sudo. Install sudo and configure your user."
-  require_command pacman "This script is designed for Arch Linux."
-}
-
-detect_multilib() {
-  if grep -Eq '^\s*\[multilib\]' /etc/pacman.conf; then
-    MULTILIB_ENABLED=1
-  fi
-}
-
-update_system() {
-  log "Syncing package databases and updating system..."
-  run_root_cmd pacman -Syu --noconfirm
-}
-
-enable_multilib() {
-  local conf="/etc/pacman.conf"
-  if grep -Eq '^\s*\[multilib\]' "$conf"; then
-    log "Multilib repository already enabled."
-    MULTILIB_ENABLED=1
-    return
-  fi
-
-  log "Enabling multilib repository..."
-  run_root_cmd cp "$conf" "${conf}.bak.$(date +%Y%m%d%H%M%S)"
-  if grep -Eq '^\s*#\s*\[multilib\]' "$conf"; then
-    run_root_cmd sed -i '/^\s*#\s*\[multilib\]/,/Include/s/^#\s*//' "$conf"
-  else
-    printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' | run_root_cmd tee -a "$conf" >/dev/null
-  fi
-  run_root_cmd pacman -Sy
-  MULTILIB_ENABLED=1
-}
-
-ensure_multilib_for_gaming() {
-  if [[ $MULTILIB_ENABLED -eq 1 ]]; then
-    return 0
-  fi
-  warn "Steam and other 32-bit gaming components require the multilib repository."
-  if prompt_yes_no "Enable multilib now to continue installing the gaming stack?" "y"; then
-    enable_multilib
-    return 0
-  fi
-  warn "Skipping gaming package installation because multilib remains disabled."
   return 1
 }
 
@@ -389,10 +307,10 @@ select_bootloader_mode_choice() {
   local default_choice="$detected"
   local selection
 
-  if [[ $UI_MODE == "whiptail" ]]; then
-    selection=$(whiptail --title "$UI_TITLE" --default-item "$default_choice" --menu "$prompt" 15 70 "$UI_MENU_HEIGHT" \
-      "uefi" "UEFI system" \
-      "bios" "Legacy BIOS" 3>&1 1>&2 2>&3) || ui_cancelled
+  if [[ $UI_MODE == "dialog" ]]; then
+    selection=$(dialog --title "$UI_TITLE" --default-item "$default_choice" --menu "$prompt" 15 70 "$UI_MENU_HEIGHT" \
+      uefi "UEFI system" \
+      bios "Legacy BIOS" --stdout) || ui_cancelled
   else
     echo "$prompt"
     echo "  1) UEFI"
@@ -452,63 +370,6 @@ select_run_mode() {
   log "Auto-detected run mode: $RUN_MODE"
 }
 
-check_base_install_prereqs() {
-  if [[ $EUID -ne 0 ]]; then
-    err "Full install mode must run as root from the Arch ISO."
-    exit 1
-  fi
-  local required=(lsblk sgdisk mkfs.fat mkfs.ext4 pacstrap arch-chroot)
-  for cmd in "${required[@]}"; do
-    require_command "$cmd" "Required command '$cmd' not found in live environment."
-  done
-  local detected
-  detected=$(detect_current_boot_mode)
-  log "Live environment boot mode detected: ${detected^^}."
-}
-
-prompt_hostname() {
-  local input
-  while true; do
-    input=$(prompt_text_input "Hostname" "$BASE_HOSTNAME")
-    if [[ -n "$input" ]]; then
-      BASE_HOSTNAME="$input"
-      break
-    fi
-    echo "Hostname cannot be empty."
-  done
-}
-
-prompt_username() {
-  local input
-  while true; do
-    input=$(prompt_text_input "Primary username" "$BASE_USERNAME")
-    if [[ "$input" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-      BASE_USERNAME="$input"
-      break
-    fi
-    echo "Invalid username. Use lowercase letters, numbers, dash or underscore."
-  done
-}
-
-prompt_timezone() {
-  local input
-  input=$(prompt_text_input "Timezone (Region/City)" "$BASE_TIMEZONE")
-  BASE_TIMEZONE="$input"
-}
-
-prompt_locale() {
-  local input
-  input=$(prompt_text_input "Locale" "$BASE_LOCALE")
-  BASE_LOCALE="$input"
-}
-
-prompt_password() {
-  local var_name="$1"
-  local label="$2"
-  local pass1 pass2
-  while true; do
-    pass1=$(prompt_secret_input "Enter $label password")
-    pass2=$(prompt_secret_input "Confirm $label password")
     if [[ -z "$pass1" ]]; then
       echo "Password cannot be empty."
       continue
@@ -535,7 +396,7 @@ select_existing_user() {
     return 1
   fi
 
-  if [[ $UI_MODE == "whiptail" ]]; then
+  if [[ $UI_MODE == "dialog" ]]; then
     local menu_entries=()
     for entry in "${user_entries[@]}"; do
       local name="${entry%%:*}"
@@ -543,7 +404,7 @@ select_existing_user() {
       menu_entries+=("$name" "$home")
     done
     local selection
-    selection=$(whiptail --title "$UI_TITLE" --menu "Select user to grant sudo" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
+    selection=$(dialog --title "$UI_TITLE" --menu "Select user to grant sudo" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" --stdout) || ui_cancelled
     printf '%s' "$selection"
     return
   fi
@@ -567,61 +428,47 @@ select_existing_user() {
   done
 }
 
-select_gaming_components() {
-  local -a selections=("${GAMING_COMPONENTS_SELECTED[@]}")
-  if [[ $UI_MODE == "whiptail" ]]; then
-    local checklist=()
-    for option in steam lutris wine gamemode mangohud pipewire openxr dxvk; do
-      local desc=""
-      case "$option" in
-        steam) desc="Steam client + runtime" ;;
-        lutris) desc="Lutris launcher" ;;
-        wine) desc="Wine + helpers" ;;
-        gamemode) desc="Feral gamemode service" ;;
-        mangohud) desc="MangoHud overlay + GOverlay" ;;
-        pipewire) desc="PipeWire audio stack" ;;
-        openxr) desc="OpenXR + Vulkan tools" ;;
-        dxvk) desc="DXVK binaries (needs multilib)" ;;
-      esac
-      local state="off"
-      for sel in "${GAMING_COMPONENTS_SELECTED[@]}"; do
-        if [[ $sel == "$option" ]]; then
-          state="on"
-          break
-        fi
-      done
-      checklist+=("$option" "$desc" "$state")
-    done
-    local result
-    result=$(whiptail --title "$UI_TITLE" --checklist "Select gaming components to install" 20 80 10 "${checklist[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
-    result="${result//\"/}"
-    read -r -a selections <<<"$result"
-  else
-    echo "Select gaming components to install (comma-separated). Options:"
-    echo "  steam, lutris, wine, gamemode, mangohud, pipewire, openxr, dxvk"
-    local default_input
-    default_input=$(IFS=, ; echo "${GAMING_COMPONENTS_SELECTED[*]}")
-    local input
-    read -r -p "Selection (default: $default_input): " input
-    input="${input:-$default_input}"
-    IFS=',' read -ra selections <<<"$input"
-    for i in "${!selections[@]}"; do
-      local trimmed="${selections[i]}"
-      trimmed="${trimmed#${trimmed%%[![:space:]]*}}"
-      trimmed="${trimmed%${trimmed##*[![:space:]]}}"
-      selections[i]="${trimmed,,}"
-    done
+prompt_disk_selection() {
+  local prompt="$1"
+  local -a disk_entries=()
+  mapfile -t disk_entries < <(lsblk -dpno NAME,SIZE,TYPE | awk '$3=="disk" {print $1" "$2}')
+  if [[ ${#disk_entries[@]} -eq 0 ]]; then
+    err "No disks detected."
+    exit 1
   fi
 
-  local -a filtered=()
-  for sel in "${selections[@]}"; do
-    case "$sel" in
-      steam|lutris|wine|gamemode|mangohud|pipewire|openxr|dxvk)
-        filtered+=("$sel")
-        ;;
-    esac
+  if [[ $UI_MODE == "dialog" ]]; then
+    local menu_entries=()
+    local entry name size
+    for entry in "${disk_entries[@]}"; do
+      name="${entry%% *}"
+      size="${entry#* }"
+      menu_entries+=("$name" "$size")
+    done
+    local selection
+    selection=$(dialog --title "$UI_TITLE" --menu "$prompt" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" --stdout) || ui_cancelled
+    printf '%s' "$selection"
+    return
+  fi
+
+  echo "Available disks:"
+  local i entry name size
+  for i in "${!disk_entries[@]}"; do
+    entry="${disk_entries[i]}"
+    name="${entry%% *}"
+    size="${entry#* }"
+    printf '  %d) %s (%s)\n' "$((i + 1))" "$name" "$size"
   done
-  GAMING_COMPONENTS_SELECTED=("${filtered[@]}")
+
+  local choice
+  while true; do
+    read -r -p "$prompt [1-${#disk_entries[@]}]: " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#disk_entries[@]})); then
+      printf '%s' "${disk_entries[choice-1]%% *}"
+      return
+    fi
+    echo "Invalid selection, try again."
+  done
 }
 
 install_gaming_packages() {
@@ -666,49 +513,6 @@ install_gaming_packages() {
   done
 
   install_packages "Installing selected gaming packages..." "${deduped[@]}"
-}
-
-prompt_disk_selection() {
-  local prompt="$1"
-  local -a disk_entries=()
-  mapfile -t disk_entries < <(lsblk -dpno NAME,SIZE,TYPE | awk '$3=="disk" {print $1" "$2}')
-  if [[ ${#disk_entries[@]} -eq 0 ]]; then
-    err "No disks detected."
-    exit 1
-  fi
-
-  if [[ $UI_MODE == "whiptail" ]]; then
-    local menu_entries=()
-    local entry name size
-    for entry in "${disk_entries[@]}"; do
-      name="${entry%% *}"
-      size="${entry#* }"
-      menu_entries+=("$name" "$size")
-    done
-    local selection
-    selection=$(whiptail --title "$UI_TITLE" --menu "$prompt" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
-    printf '%s' "$selection"
-    return
-  fi
-
-  echo "Available disks:"
-  local i entry name size
-  for i in "${!disk_entries[@]}"; do
-    entry="${disk_entries[i]}"
-    name="${entry%% *}"
-    size="${entry#* }"
-    printf '  %d) %s (%s)\n' "$((i + 1))" "$name" "$size"
-  done
-
-  local choice
-  while true; do
-    read -r -p "$prompt [1-${#disk_entries[@]}]: " choice
-    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#disk_entries[@]})); then
-      printf '%s' "${disk_entries[choice-1]%% *}"
-      return
-    fi
-    echo "Invalid selection, try again."
-  done
 }
 
 select_install_disk() {
@@ -959,8 +763,28 @@ cleanup_mounts() {
   fi
 }
 
+ensure_live_iso_dependencies() {
+  local -a required=(dialog reflector git)
+  local -a missing=()
+  for pkg in "${required[@]}"; do
+    if ! pacman -Qi "$pkg" >/dev/null 2>&1; then
+      missing+=("$pkg")
+    fi
+  done
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    log "Live ISO dependencies already satisfied (${required[*]})."
+    return
+  fi
+
+  log "Installing missing live ISO dependencies: ${missing[*]}"
+  pacman -Sy --noconfirm
+  pacman -S --noconfirm --needed "${missing[@]}"
+}
+
 run_full_arch_install() {
   check_base_install_prereqs
+  ensure_live_iso_dependencies
   trap cleanup_mounts EXIT
   prompt_hostname
   prompt_timezone
@@ -1006,13 +830,13 @@ select_desktop_environment() {
     "Skip (already configured)"
   )
 
-  if [[ $UI_MODE == "whiptail" ]]; then
+  if [[ $UI_MODE == "dialog" ]]; then
     local menu_entries=()
     for i in "${!options[@]}"; do
       menu_entries+=("${options[i]}" "${labels[i]}")
     done
     local selection
-    selection=$(whiptail --title "$UI_TITLE" --default-item skip --menu "Choose a desktop environment" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
+    selection=$(dialog --title "$UI_TITLE" --default-item skip --menu "Choose a desktop environment" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" --stdout) || ui_cancelled
     DESKTOP_CHOICE="$selection"
     return
   fi
@@ -1207,7 +1031,7 @@ ensure_aur_helper_present() {
 
 select_aur_helper() {
   local options=(paru yay)
-  if [[ $UI_MODE == "whiptail" ]]; then
+  if [[ $UI_MODE == "dialog" ]]; then
     local menu_entries=()
     for helper in "${options[@]}"; do
       local desc=""
@@ -1217,7 +1041,7 @@ select_aur_helper() {
       esac
       menu_entries+=("$helper" "$desc")
     done
-    AUR_HELPER_SELECTION=$(whiptail --title "$UI_TITLE" --default-item "$AUR_HELPER_SELECTION" --menu "Choose an AUR helper to install" 15 70 "$UI_MENU_HEIGHT" "${menu_entries[@]}" 3>&1 1>&2 2>&3) || ui_cancelled
+    AUR_HELPER_SELECTION=$(dialog --title "$UI_TITLE" --default-item "$AUR_HELPER_SELECTION" --menu "Choose an AUR helper to install" 15 70 "$UI_MENU_HEIGHT" "${menu_entries[@]}" --stdout) || ui_cancelled
     return
   fi
 
@@ -1291,6 +1115,283 @@ install_aur_packages() {
   "$AUR_HELPER" -S "${AUR_FLAGS[@]}" "${aur_packages[@]}"
 }
 
+select_aur_kernel_package() {
+  local -a kernel_ids=(linux-amd-znver3 linux-ck-zen linux-tkg-bmq custom)
+  local -a kernel_desc=(
+    "Zen 3 optimized kernel"
+    "ck patchset tuned for Zen"
+    "linux-tkg with BMQ scheduler"
+    "Enter a custom AUR kernel"
+  )
+  local selection=""
+
+  if [[ $UI_MODE == "dialog" ]]; then
+    local -a menu_entries=()
+    for i in "${!kernel_ids[@]}"; do
+      menu_entries+=("${kernel_ids[i]}" "${kernel_desc[i]}")
+    done
+    selection=$(dialog --title "$UI_TITLE" --default-item "$AUR_KERNEL_SELECTION" \
+      --menu "Choose an AUR kernel to install" 20 80 "$UI_MENU_HEIGHT" "${menu_entries[@]}" --stdout) || ui_cancelled
+  else
+    echo "Select an AUR kernel to install:"
+    for i in "${!kernel_ids[@]}"; do
+      printf '  %d) %s - %s\n' "$((i + 1))" "${kernel_ids[i]}" "${kernel_desc[i]}"
+    done
+    local choice
+    local default_choice=1
+    read -r -p "Choice [1-${#kernel_ids[@]}] (default: $default_choice): " choice
+    choice="${choice:-$default_choice}"
+    if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#kernel_ids[@]})); then
+      selection="${kernel_ids[choice-1]}"
+    else
+      selection="${kernel_ids[0]}"
+    fi
+  fi
+
+  if [[ $selection == "custom" ]]; then
+    selection=$(prompt_text_input "Enter the exact AUR kernel package name" "$AUR_KERNEL_SELECTION")
+  fi
+
+  selection="${selection// /}" # strip spaces
+  if [[ -z "$selection" ]]; then
+    err "Kernel selection cannot be empty."
+    return 1
+  fi
+  AUR_KERNEL_SELECTION="$selection"
+  printf '%s' "$selection"
+}
+
+install_aur_kernel_option() {
+  if [[ $ENABLE_AUR -ne 1 ]]; then
+    return
+  fi
+  detect_aur_helper
+  if [[ -z "$AUR_HELPER" ]]; then
+    warn "No AUR helper detected; skipping kernel installation."
+    return
+  fi
+  if ! prompt_yes_no "Install an additional kernel from AUR?" "n"; then
+    return
+  fi
+
+  local kernel_pkg
+  if ! kernel_pkg=$(select_aur_kernel_package); then
+    warn "Skipping AUR kernel installation."
+    return
+  fi
+
+  local -a packages=("$kernel_pkg")
+  if [[ "$kernel_pkg" != *-headers ]]; then
+    packages+=("${kernel_pkg}-headers")
+  fi
+
+  log "Installing AUR kernel (${packages[*]}) via $AUR_HELPER..."
+  if ! "$AUR_HELPER" -S "${AUR_FLAGS[@]}" "${packages[@]}"; then
+    warn "Failed to install $kernel_pkg from AUR."
+    return
+  fi
+
+  if command -v grub-mkconfig >/dev/null 2>&1; then
+    log "Regenerating GRUB configuration for the new kernel..."
+    run_root_cmd grub-mkconfig -o /boot/grub/grub.cfg
+  else
+    warn "grub-mkconfig not found; update your bootloader manually."
+  fi
+}
+
+is_gaming_component_selected() {
+  local needle="$1"
+  local component
+  for component in "${GAMING_COMPONENTS_SELECTED[@]}"; do
+    if [[ "$component" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+format_validation_line() {
+  local label="$1"
+  local status="$2"
+  local note="$3"
+  printf '%-24s %-6s %s' "$label" "$status" "$note"
+}
+
+add_validation_result() {
+  local -n _lines_ref="$1"
+  local label="$2"
+  local status="$3"
+  local note="$4"
+  local -n _ok_ref="$5"
+  local -n _warn_ref="$6"
+  local -n _fail_ref="$7"
+  local -n _info_ref="$8"
+  _lines_ref+=("$(format_validation_line "$label" "$status" "$note")")
+  case "$status" in
+    OK) ((_ok_ref++)) ;;
+    WARN) ((_warn_ref++)) ;;
+    FAIL) ((_fail_ref++)) ;;
+    INFO) ((_info_ref++)) ;;
+  esac
+}
+
+post_install_validation() {
+  local -a validation_lines=()
+  local ok=0
+  local warn_count=0
+  local fail=0
+  local info=0
+  local status=""
+  local note=""
+
+  local user_services_available=0
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl --user status basic.target >/dev/null 2>&1; then
+      user_services_available=1
+    fi
+  fi
+
+  if [[ $INSTALL_GAMING -eq 1 ]]; then
+    if is_gaming_component_selected "steam"; then
+      if pacman -Qi steam >/dev/null 2>&1; then
+        status="OK"; note="steam package installed"
+      else
+        status="WARN"; note="Install with 'sudo pacman -S steam'"
+      fi
+      add_validation_result validation_lines "Steam client" "$status" "$note" ok warn_count fail info
+    fi
+
+    if is_gaming_component_selected "lutris"; then
+      if pacman -Qi lutris >/dev/null 2>&1; then
+        status="OK"; note="lutris package installed"
+      else
+        status="WARN"; note="Install with 'sudo pacman -S lutris'"
+      fi
+      add_validation_result validation_lines "Lutris" "$status" "$note" ok warn_count fail info
+    fi
+
+    if is_gaming_component_selected "wine"; then
+      if pacman -Qi wine >/dev/null 2>&1; then
+        status="OK"; note="wine package installed"
+      else
+        status="WARN"; note="Install with 'sudo pacman -S wine'"
+      fi
+      add_validation_result validation_lines "Wine" "$status" "$note" ok warn_count fail info
+    fi
+
+    if is_gaming_component_selected "gamemode"; then
+      if command -v gamemoded >/dev/null 2>&1; then
+        if (( user_services_available )); then
+          if systemctl --user is-active --quiet gamemoded.service >/dev/null 2>&1; then
+            status="OK"; note="gamemoded user service active"
+          else
+            status="WARN"; note="Enable with 'systemctl --user enable --now gamemoded.service'"
+          fi
+        else
+          status="INFO"; note="gamemode installed; user services unavailable in this session"
+        fi
+      else
+        status="WARN"; note="Install with 'sudo pacman -S gamemode'"
+      fi
+      add_validation_result validation_lines "Gamemode" "$status" "$note" ok warn_count fail info
+    fi
+
+    if is_gaming_component_selected "mangohud"; then
+      if command -v mangohud >/dev/null 2>&1; then
+        status="OK"; note="mangohud binary present"
+      else
+        status="WARN"; note="Install with 'sudo pacman -S mangohud'"
+      fi
+      add_validation_result validation_lines "MangoHud" "$status" "$note" ok warn_count fail info
+    fi
+
+    if is_gaming_component_selected "pipewire"; then
+      if command -v pipewire >/dev/null 2>&1; then
+        if (( user_services_available )); then
+          if systemctl --user is-active --quiet pipewire.service >/dev/null 2>&1; then
+            status="OK"; note="pipewire user service active"
+          else
+            status="WARN"; note="Start with 'systemctl --user enable --now pipewire.service'"
+          fi
+        else
+          status="INFO"; note="PipeWire installed; user services unavailable in this session"
+        fi
+      else
+        status="WARN"; note="Install with 'sudo pacman -S pipewire pipewire-pulse'"
+      fi
+      add_validation_result validation_lines "PipeWire" "$status" "$note" ok warn_count fail info
+    fi
+
+    if is_gaming_component_selected "dxvk"; then
+      if pacman -Qi dxvk-bin >/dev/null 2>&1; then
+        status="OK"; note="dxvk-bin package installed"
+      else
+        status="WARN"; note="Install with 'sudo pacman -S dxvk-bin' after enabling multilib"
+      fi
+      add_validation_result validation_lines "DXVK" "$status" "$note" ok warn_count fail info
+    fi
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet NetworkManager.service >/dev/null 2>&1; then
+      status="OK"; note="NetworkManager service active"
+    else
+      if systemctl is-enabled --quiet NetworkManager.service >/dev/null 2>&1; then
+        status="WARN"; note="Service enabled but inactive; start it with 'sudo systemctl start NetworkManager.service'"
+      else
+        status="WARN"; note="Enable with 'sudo systemctl enable --now NetworkManager.service'"
+      fi
+    fi
+  else
+    status="INFO"; note="systemctl unavailable; skipping NetworkManager check"
+  fi
+  add_validation_result validation_lines "NetworkManager" "$status" "$note" ok warn_count fail info
+
+  if command -v flatpak >/dev/null 2>&1; then
+    local remotes
+    remotes=$(flatpak remote-list --columns=name 2>/dev/null || true)
+    if grep -Eq '^flathub$' <<<"$remotes"; then
+      status="OK"; note="Flathub remote configured"
+    else
+      status="WARN"; note="Add Flathub via 'flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo'"
+    fi
+  else
+    status="INFO"; note="Flatpak not installed (expected if you skipped that step)"
+  fi
+  add_validation_result validation_lines "Flatpak/Flathub" "$status" "$note" ok warn_count fail info
+
+  detect_aur_helper
+  if [[ -n "$AUR_HELPER" ]]; then
+    status="OK"; note="Detected $AUR_HELPER"
+  else
+    if [[ $ENABLE_AUR -eq 1 ]]; then
+      status="WARN"; note="Missing AUR helper; rerun the script to install paru or yay"
+    else
+      status="INFO"; note="AUR helper not installed (enable AUR support to add one)"
+    fi
+  fi
+  add_validation_result validation_lines "AUR helper" "$status" "$note" ok warn_count fail info
+
+  local report_body="No validation checks were run."
+  if ((${#validation_lines[@]} > 0)); then
+    report_body=$(printf '%s\n' "${validation_lines[@]}")
+  fi
+  local totals="Totals: OK=$ok WARN=$warn_count FAIL=$fail INFO=$info"
+  local body="Post-install validation results:\n\n${report_body}\n\n${totals}"
+
+  if [[ $UI_MODE == "dialog" ]]; then
+    local dialog_height=$((10 + ${#validation_lines[@]}))
+    if ((dialog_height < 12)); then
+      dialog_height=12
+    elif ((dialog_height > 30)); then
+      dialog_height=30
+    fi
+    dialog --title "$UI_TITLE" --msgbox "$body" "$dialog_height" 90 || true
+  else
+    printf '%s\n' "$body"
+  fi
+}
+
 post_install_summary() {
   cat <<'EOF'
 
@@ -1358,16 +1459,19 @@ EOF
     if prompt_yes_no "Install Heroic Launcher + ProtonUp from AUR?" "y"; then
       install_aur_packages
     fi
+    install_aur_kernel_option
   else
     warn "Skipping optional Heroic/ProtonUp install because AUR support is disabled."
   fi
   configure_swapfile
   grant_sudo_privileges
+  post_install_validation
   post_install_summary
 }
 
 main() {
   parse_cli_args "$@"
+  detect_timezone_default
   init_ui
   select_run_mode
   if [[ $RUN_MODE == "fullinstall" ]]; then
