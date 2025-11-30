@@ -9,6 +9,8 @@ MULTILIB_ENABLED=0
 DESKTOP_CHOICE="skip"
 ENABLE_AUR=0
 OPTIMIZE_MIRRORS=0
+INSTALL_GAMING=1
+SWAPFILE_PATH="/swapfile"
 RUN_MODE="postinstall"
 MOUNTPOINT="/mnt"
 BASE_DISK=""
@@ -225,6 +227,19 @@ enable_multilib() {
   fi
   run_root_cmd pacman -Sy
   MULTILIB_ENABLED=1
+}
+
+ensure_multilib_for_gaming() {
+  if [[ $MULTILIB_ENABLED -eq 1 ]]; then
+    return 0
+  fi
+  warn "Steam and other 32-bit gaming components require the multilib repository."
+  if prompt_yes_no "Enable multilib now to continue installing the gaming stack?" "y"; then
+    enable_multilib
+    return 0
+  fi
+  warn "Skipping gaming package installation because multilib remains disabled."
+  return 1
 }
 
 optimize_mirrors() {
@@ -519,6 +534,14 @@ select_existing_user() {
   done
 }
 
+prompt_gaming_packages() {
+  if prompt_yes_no "Install the full gaming package stack (Steam, Lutris, Wine, etc.)?" "y"; then
+    INSTALL_GAMING=1
+  else
+    INSTALL_GAMING=0
+  fi
+}
+
 prompt_disk_selection() {
   local prompt="$1"
   local -a disk_entries=()
@@ -675,6 +698,63 @@ grant_sudo_privileges() {
   run_root_cmd usermod -aG wheel "$username"
   ensure_wheel_sudoers
   log "User $username now has sudo access via wheel group."
+}
+
+configure_swapfile() {
+  if ! prompt_yes_no "Create or update a swap file?" "n"; then
+    return
+  fi
+
+  local default_size="4"
+  local size_input
+  while true; do
+    size_input=$(prompt_text_input "Swap size in GiB (integer >0)" "$default_size")
+    if [[ "$size_input" =~ ^[0-9]+$ ]] && ((size_input > 0)); then
+      break
+    fi
+    echo "Enter a positive integer."
+  done
+
+  local path
+  path=$(prompt_text_input "Swap file path" "$SWAPFILE_PATH")
+  if [[ -z "$path" ]]; then
+    warn "Swap file path cannot be empty; aborting swap setup."
+    return
+  fi
+
+  SWAPFILE_PATH="$path"
+
+  if run_root_cmd test -e "$path"; then
+    if prompt_yes_no "Swap file $path already exists. Recreate it?" "n"; then
+      run_root_cmd swapoff "$path" 2>/dev/null || true
+      run_root_cmd rm -f "$path"
+    else
+      warn "Keeping existing swap file."
+      return
+    fi
+  fi
+
+  log "Creating swap file $path (${size_input}G)..."
+  if ! run_root_cmd fallocate -l "${size_input}G" "$path"; then
+    warn "fallocate failed; falling back to dd (may take longer)."
+    if ! run_root_cmd dd if=/dev/zero of="$path" bs=1M count="$((size_input * 1024))" status=progress; then
+      err "Failed to allocate swap file."; return
+    fi
+  fi
+  run_root_cmd chmod 600 "$path"
+  if ! run_root_cmd mkswap "$path"; then
+    err "mkswap failed; removing incomplete swap file."
+    run_root_cmd rm -f "$path"
+    return
+  fi
+  run_root_cmd swapon "$path"
+  if run_root_cmd grep -q "^$path[[:space:]]" /etc/fstab; then
+    log "Swap entry for $path already present in /etc/fstab."
+  else
+    printf '%s\n' "$path none swap defaults 0 0" | run_root_cmd tee -a /etc/fstab >/dev/null
+    log "Added $path to /etc/fstab."
+  fi
+  log "Swap configured and enabled."
 }
 
 configure_system_in_chroot() {
@@ -962,6 +1042,24 @@ detect_aur_helper() {
   AUR_HELPER=""
 }
 
+ensure_aur_helper_present() {
+  detect_aur_helper
+  if [[ -n "$AUR_HELPER" ]]; then
+    log "Using detected AUR helper: $AUR_HELPER"
+    return 0
+  fi
+
+  select_aur_helper
+  install_selected_aur_helper "$AUR_HELPER_SELECTION"
+  detect_aur_helper
+  if [[ -z "$AUR_HELPER" ]]; then
+    warn "Failed to set up an AUR helper."
+    return 1
+  fi
+  log "AUR helper $AUR_HELPER installed successfully."
+  return 0
+}
+
 select_aur_helper() {
   local options=(paru yay)
   if [[ $UI_MODE == "whiptail" ]]; then
@@ -1012,27 +1110,19 @@ install_selected_aur_helper() {
 }
 
 configure_aur_support() {
-  if ! prompt_yes_no "Enable AUR helper support?" "y"; then
+  if ! prompt_yes_no "Enable AUR helper support (install helper + optional packages)?" "y"; then
     ENABLE_AUR=0
     warn "AUR support disabled; skipping community utilities."
+    if prompt_yes_no "Install an AUR helper anyway for manual use?" "n"; then
+      ensure_aur_helper_present || warn "Unable to provision an AUR helper."
+    fi
     return
   fi
 
   ENABLE_AUR=1
-  detect_aur_helper
-  if [[ -n "$AUR_HELPER" ]]; then
-    log "Using detected AUR helper: $AUR_HELPER"
-    return
-  fi
-
-  select_aur_helper
-  install_selected_aur_helper "$AUR_HELPER_SELECTION"
-  detect_aur_helper
-  if [[ -z "$AUR_HELPER" ]]; then
+  if ! ensure_aur_helper_present; then
     warn "Failed to set up an AUR helper. AUR features will be unavailable."
     ENABLE_AUR=0
-  else
-    log "AUR helper $AUR_HELPER installed successfully."
   fi
 }
 
@@ -1105,7 +1195,16 @@ EOF
   install_amd_stack
   select_desktop_environment
   install_desktop_environment
-  install_gaming_packages
+  prompt_gaming_packages
+  if [[ $INSTALL_GAMING -eq 1 ]]; then
+    if ensure_multilib_for_gaming; then
+      install_gaming_packages
+    else
+      warn "You can re-run this script later after enabling multilib to install Steam, Lutris, and other gaming tools."
+    fi
+  else
+    warn "Skipping gaming package installation per user selection."
+  fi
   configure_gamemode
   configure_mangohud_defaults
   setup_flatpak
@@ -1117,6 +1216,7 @@ EOF
   else
     warn "Skipping optional Heroic/ProtonUp install because AUR support is disabled."
   fi
+  configure_swapfile
   grant_sudo_privileges
   post_install_summary
 }
