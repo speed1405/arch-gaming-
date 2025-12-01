@@ -13,8 +13,13 @@ AUR_KERNEL_SELECTION="linux-amd-znver3"
 MULTILIB_ENABLED=0
 DESKTOP_CHOICE="skip"
 ENABLE_AUR=0
+AUR_SUPPORT_CONFIGURED=0
+AUR_OPTIONAL_APPS_INSTALLED=0
 OPTIMIZE_MIRRORS=0
 INSTALL_GAMING=1
+GAMING_STACK_CONFIGURED=0
+GAMING_STACK_INSTALLED=0
+FLATPAK_CONFIGURED=0
 SWAPFILE_PATH="/swapfile"
 DEFAULT_GAMING_COMPONENTS=(steam lutris wine gamemode mangohud pipewire openxr dxvk)
 GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
@@ -442,11 +447,15 @@ select_gaming_components() {
 }
 
 configure_gaming_packages() {
-  if ! prompt_yes_no "Install the gaming stack (Steam, Lutris, Wine, etc.)?" "y"; then
-    INSTALL_GAMING=0
-    GAMING_COMPONENTS_SELECTED=()
-    warn "Skipping gaming stack installation per user choice."
-    return
+  local auto_enable="${1:-0}"
+  if [[ "$auto_enable" != "1" ]]; then
+    if ! prompt_yes_no "Install the gaming stack (Steam, Lutris, Wine, etc.)?" "y"; then
+      INSTALL_GAMING=0
+      GAMING_COMPONENTS_SELECTED=()
+      warn "Skipping gaming stack installation per user choice."
+      GAMING_STACK_CONFIGURED=1
+      return
+    fi
   fi
 
   INSTALL_GAMING=1
@@ -460,6 +469,31 @@ configure_gaming_packages() {
     warn "No gaming components selected; set will be skipped later unless you re-run this step."
   else
     log "Selected gaming components: ${GAMING_COMPONENTS_SELECTED[*]}"
+  fi
+  GAMING_STACK_CONFIGURED=1
+}
+
+install_gaming_stack_flow() {
+  local auto_enable="${1:-0}"
+  if [[ $GAMING_STACK_INSTALLED -eq 1 ]]; then
+    log "Gaming stack already installed; skipping."
+    return
+  fi
+
+  if [[ $GAMING_STACK_CONFIGURED -eq 0 ]]; then
+    configure_gaming_packages "$auto_enable"
+  fi
+
+  if [[ $INSTALL_GAMING -ne 1 || ${#GAMING_COMPONENTS_SELECTED[@]} -eq 0 ]]; then
+    warn "Gaming stack is disabled or has no selected components; skipping install."
+    return
+  fi
+
+  if ensure_multilib_for_gaming; then
+    install_gaming_packages
+    GAMING_STACK_INSTALLED=1
+  else
+    warn "Multilib disabled; cannot install full gaming stack right now."
   fi
 }
 
@@ -1189,6 +1223,22 @@ install_desktop_environment() {
     log "Enabling display manager $dm_service..."
     run_root_cmd systemctl enable --now "$dm_service"
   fi
+
+  if [[ $GAMING_STACK_INSTALLED -eq 0 ]]; then
+    if prompt_yes_no "Install the gaming stack alongside $label now?" "y"; then
+      install_gaming_stack_flow 1
+    else
+      warn "You can rerun this script later to install the gaming tools."
+    fi
+  fi
+
+  if [[ $AUR_SUPPORT_CONFIGURED -eq 0 ]]; then
+    configure_aur_support_flow
+  fi
+
+  if [[ $FLATPAK_CONFIGURED -eq 0 ]]; then
+    setup_flatpak
+  fi
 }
 
 install_linux_zen() {
@@ -1253,7 +1303,12 @@ EOF
 }
 
 setup_flatpak() {
+  if [[ $FLATPAK_CONFIGURED -eq 1 ]]; then
+    log "Flatpak already configured; skipping."
+    return
+  fi
   if ! prompt_yes_no "Install Flatpak and enable Flathub?" "y"; then
+    FLATPAK_CONFIGURED=1
     return
   fi
   install_packages "Installing Flatpak..." flatpak
@@ -1261,6 +1316,7 @@ setup_flatpak() {
     log "Adding Flathub remote..."
     flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
   fi
+  FLATPAK_CONFIGURED=1
 }
 
 detect_aur_helper() {
@@ -1349,6 +1405,7 @@ configure_aur_support() {
     if prompt_yes_no "Install an AUR helper anyway for manual use?" "n"; then
       ensure_aur_helper_present || warn "Unable to provision an AUR helper."
     fi
+    AUR_SUPPORT_CONFIGURED=1
     return
   fi
 
@@ -1357,6 +1414,7 @@ configure_aur_support() {
     warn "Failed to set up an AUR helper. AUR features will be unavailable."
     ENABLE_AUR=0
   fi
+  AUR_SUPPORT_CONFIGURED=1
 }
 
 install_aur_packages() {
@@ -1377,6 +1435,24 @@ install_aur_packages() {
   )
   log "Installing AUR gaming utilities via $AUR_HELPER..."
   "$AUR_HELPER" -S "${AUR_FLAGS[@]}" "${aur_packages[@]}"
+}
+
+configure_aur_support_flow() {
+  if [[ $AUR_SUPPORT_CONFIGURED -eq 0 ]]; then
+    configure_aur_support
+  fi
+
+  if [[ $ENABLE_AUR -eq 1 ]]; then
+    if [[ $AUR_OPTIONAL_APPS_INSTALLED -eq 0 ]]; then
+      if prompt_yes_no "Install Heroic Launcher + ProtonUp from AUR?" "y"; then
+        install_aur_packages
+        AUR_OPTIONAL_APPS_INSTALLED=1
+      fi
+    fi
+    install_aur_kernel_option
+  else
+    warn "Skipping optional Heroic/ProtonUp install because AUR support is disabled."
+  fi
 }
 
 select_aur_kernel_package() {
@@ -1705,28 +1781,13 @@ EOF
   install_amd_stack
   select_desktop_environment
   install_desktop_environment
-  configure_gaming_packages
-  if [[ $INSTALL_GAMING -eq 1 ]]; then
-    if ensure_multilib_for_gaming; then
-      install_gaming_packages
-    else
-      warn "You can re-run this script later after enabling multilib to install Steam, Lutris, and other gaming tools."
-    fi
-  else
-    warn "Skipping gaming package installation per user selection."
-  fi
+  install_gaming_stack_flow
   configure_gamemode
   configure_mangohud_defaults
-  setup_flatpak
-  configure_aur_support
-  if [[ $ENABLE_AUR -eq 1 ]]; then
-    if prompt_yes_no "Install Heroic Launcher + ProtonUp from AUR?" "y"; then
-      install_aur_packages
-    fi
-    install_aur_kernel_option
-  else
-    warn "Skipping optional Heroic/ProtonUp install because AUR support is disabled."
+  if [[ $FLATPAK_CONFIGURED -eq 0 ]]; then
+    setup_flatpak
   fi
+  configure_aur_support_flow
   configure_swapfile
   grant_sudo_privileges
   post_install_validation
