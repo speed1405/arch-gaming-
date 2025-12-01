@@ -14,6 +14,7 @@ TARGET_HOSTNAME="arch-gaming"
 TARGET_USERNAME="gamer"
 TARGET_TIMEZONE="UTC"
 TARGET_LOCALE="en_US.UTF-8"
+TARGET_VCONSOLE_KEYMAP="us"
 TARGET_MOUNT="/mnt"
 USER_PASSWORD=""
 ROOT_PASSWORD=""
@@ -220,6 +221,11 @@ configure_locale_timezone() {
   printf 'LANG=%s\n' "$TARGET_LOCALE" > "$TARGET_MOUNT/etc/locale.conf"
 }
 
+configure_vconsole() {
+  TARGET_VCONSOLE_KEYMAP=$(prompt "Console keymap" "$TARGET_VCONSOLE_KEYMAP")
+  printf 'KEYMAP=%s\n' "$TARGET_VCONSOLE_KEYMAP" > "$TARGET_MOUNT/etc/vconsole.conf"
+}
+
 configure_network() {
   TARGET_HOSTNAME=$(prompt "Hostname" "$TARGET_HOSTNAME")
   printf '%s\n' "$TARGET_HOSTNAME" > "$TARGET_MOUNT/etc/hostname"
@@ -245,20 +251,20 @@ create_users() {
 enable_multilib() {
   run_in_chroot "sed -i 's/^#\s*\[multilib\]/[multilib]/' /etc/pacman.conf"
   run_in_chroot "awk 'BEGIN{in_multilib=0; have_include=0}
-    /^\s*\[/ {
+    /^\\s*\\[/ {
       if (in_multilib && !have_include) {
-        print "Include = /etc/pacman.d/mirrorlist"
+        print \"Include = /etc/pacman.d/mirrorlist\"
       }
-      in_multilib = ($0 ~ /^\s*\[multilib\]/)
+      in_multilib = ($0 ~ /^\\s*\\[multilib\\]/)
       have_include = 0
       print
       next
     }
     {
-      if (in_multilib && $0 ~ /Include\s*=\s*\/etc\/pacman.d\/mirrorlist/) {
+      if (in_multilib && $0 ~ /Include\\s*=\\s*\\/etc\\/pacman.d\\/mirrorlist/) {
         have_include = 1
         print
-      } else if (in_multilib && $0 ~ /^\s*Include\s*=/) {
+      } else if (in_multilib && $0 ~ /^\\s*Include\\s*=/) {
         next
       } else {
         print
@@ -266,7 +272,7 @@ enable_multilib() {
     }
     END {
       if (in_multilib && !have_include) {
-        print "Include = /etc/pacman.d/mirrorlist"
+        print \"Include = /etc/pacman.d/mirrorlist\"
       }
     }
   ' /etc/pacman.conf > /etc/pacman.conf.tmp && mv /etc/pacman.conf.tmp /etc/pacman.conf"
@@ -384,6 +390,7 @@ main() {
   mount_partitions
   install_base_system
   configure_locale_timezone
+  configure_vconsole
   configure_network
   create_users
   enable_multilib
