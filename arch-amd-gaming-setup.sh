@@ -80,7 +80,7 @@ check_environment() {
   if [[ $EUID -ne 0 ]]; then
     err "Run this installer as root."
   fi
-  require_cmd pacstrap arch-chroot lsblk sgdisk mkfs.ext4 mkfs.fat
+  require_cmd pacstrap arch-chroot lsblk sgdisk mkfs.ext4 mkfs.fat findmnt
   if ! mountpoint -q "$TARGET_MOUNT"; then
     mkdir -p "$TARGET_MOUNT"
   fi
@@ -158,7 +158,20 @@ format_partitions() {
   mkfs.ext4 -F "$ROOT_PART"
 }
 
+unmount_existing_mounts() {
+  local part
+  for part in "$@"; do
+    [[ -z "$part" ]] && continue
+    while read -r mount_point; do
+      [[ -z "$mount_point" ]] && continue
+      log "Unmounting existing mount on $mount_point (backed by $part)"
+      umount -R "$mount_point"
+    done < <(findmnt -rn -S "$part" -o TARGET || true)
+  done
+}
+
 mount_partitions() {
+  unmount_existing_mounts "$ROOT_PART" "$EFI_PART"
   if mountpoint -q "$TARGET_MOUNT" 2>/dev/null; then
     umount -R "$TARGET_MOUNT"
   fi
