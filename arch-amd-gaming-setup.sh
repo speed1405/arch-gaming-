@@ -189,7 +189,7 @@ mount_partitions() {
 
 install_base_system() {
   log "Installing base packages"
-  pacstrap "$TARGET_MOUNT" base linux linux-firmware linux-headers networkmanager sudo base-devel vim
+  pacstrap "$TARGET_MOUNT" base linux linux-firmware linux-headers networkmanager sudo base-devel vim zstd
   genfstab -U "$TARGET_MOUNT" >> "$TARGET_MOUNT/etc/fstab"
   log "Generated fstab"
 }
