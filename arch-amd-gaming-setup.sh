@@ -23,6 +23,7 @@ FLATPAK_CONFIGURED=0
 SWAPFILE_PATH="/swapfile"
 DEFAULT_GAMING_COMPONENTS=(steam lutris wine gamemode mangohud pipewire openxr dxvk)
 GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
+GAMING_COMPONENTS_PRESELECTED=0
 RUN_MODE="postinstall"
 MOUNTPOINT="/mnt"
 BASE_DISK=""
@@ -486,32 +487,27 @@ select_gaming_components() {
 
 configure_gaming_packages() {
   local auto_enable="${1:-0}"
-  if [[ "$auto_enable" != "1" ]]; then
+  local force_install=$((auto_enable == 1 || AUTO_GAMING_INSTALL == 1 ? 1 : 0))
+
+  if [[ $force_install -ne 1 ]]; then
     if ! prompt_yes_no "Install the gaming stack (Steam, Lutris, Wine, etc.)?" "y"; then
       INSTALL_GAMING=0
       GAMING_COMPONENTS_SELECTED=()
       warn "Skipping gaming stack installation per user choice."
       GAMING_STACK_CONFIGURED=1
-      AUR_SUPPORT_CONFIGURED=0
-      AUR_OPTIONAL_APPS_INSTALLED=0
-      AUTO_SELECT_DESKTOP=0
-      AUTO_GAMING_INSTALL=0
-      AUTO_ENABLE_FLATPAK=0
-      AUTO_ENABLE_AUR=0
-      AUTO_INSTALL_AUR_OPTIONALS=0
-      GAMING_COMPONENTS_PRESELECTED=0
-      PRESEED_PATH="${ARCH_SETUP_PRESEED:-}"
-      PRESEED_TEMP_FILE=""
-      PRESEED_TARGET_PATH=""
       return
     fi
   fi
 
   INSTALL_GAMING=1
-  if prompt_yes_no "Customize which gaming components to install?" "n"; then
-    select_gaming_components
+  if [[ $GAMING_COMPONENTS_PRESELECTED -eq 1 && ${#GAMING_COMPONENTS_SELECTED[@]} -gt 0 ]]; then
+    log "Using preselected gaming components: ${GAMING_COMPONENTS_SELECTED[*]}"
   else
-    GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
+    if prompt_yes_no "Customize which gaming components to install?" "n"; then
+      select_gaming_components
+    else
+      GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
+    fi
   fi
 
   if [[ ${#GAMING_COMPONENTS_SELECTED[@]} -eq 0 ]]; then
@@ -525,6 +521,59 @@ configure_gaming_packages() {
 serialize_gaming_components() {
   local IFS=','
   printf '%s' "${GAMING_COMPONENTS_SELECTED[*]}"
+}
+
+install_gaming_packages() {
+  local -a packages=()
+  local component
+  for component in "${GAMING_COMPONENTS_SELECTED[@]}"; do
+    case "$component" in
+      steam)
+        packages+=(steam steam-native-runtime)
+        ;;
+      lutris)
+        packages+=(lutris)
+        ;;
+      wine)
+        packages+=(wine wine-mono wine-gecko winetricks)
+        ;;
+      gamemode)
+        packages+=(gamemode lib32-gamemode)
+        ;;
+      mangohud)
+        packages+=(mangohud lib32-mangohud)
+        ;;
+      pipewire)
+        packages+=(pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber gst-plugin-pipewire lib32-pipewire)
+        ;;
+      openxr)
+        packages+=(openxr)
+        ;;
+      dxvk)
+        packages+=(dxvk)
+        ;;
+    esac
+  done
+
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    warn "No installable gaming packages detected after filtering."
+    return
+  fi
+
+  local -a deduped=()
+  local -A seen=()
+  local pkg
+  for pkg in "${packages[@]}"; do
+    if [[ -z "$pkg" ]]; then
+      continue
+    fi
+    if [[ -z ${seen[$pkg]+x} ]]; then
+      deduped+=("$pkg")
+      seen[$pkg]=1
+    fi
+  done
+
+  install_packages "Installing selected gaming packages..." "${deduped[@]}"
 }
 
 install_gaming_stack_flow() {
@@ -895,56 +944,6 @@ prompt_disk_selection() {
     done
     echo "Invalid selection, try again."
   done
-}
-
-configure_gaming_packages() {
-  local auto_enable="${1:-0}"
-  local force_install=$((auto_enable == 1 || AUTO_GAMING_INSTALL == 1 ? 1 : 0))
-
-  if [[ $force_install -ne 1 ]]; then
-    if ! prompt_yes_no "Install the gaming stack (Steam, Lutris, Wine, etc.)?" "y"; then
-      INSTALL_GAMING=0
-      GAMING_COMPONENTS_SELECTED=()
-      warn "Skipping gaming stack installation per user choice."
-      GAMING_STACK_CONFIGURED=1
-      return
-    fi
-  fi
-
-  INSTALL_GAMING=1
-  if [[ $GAMING_COMPONENTS_PRESELECTED -eq 1 && ${#GAMING_COMPONENTS_SELECTED[@]} -gt 0 ]]; then
-    log "Using preselected gaming components: ${GAMING_COMPONENTS_SELECTED[*]}"
-  else
-    if prompt_yes_no "Customize which gaming components to install?" "n"; then
-      select_gaming_components
-    else
-      GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
-    fi
-  fi
-
-  if [[ ${#GAMING_COMPONENTS_SELECTED[@]} -eq 0 ]]; then
-    warn "No gaming components selected; set will be skipped later unless you re-run this step."
-  else
-    log "Selected gaming components: ${GAMING_COMPONENTS_SELECTED[*]}"
-  fi
-  GAMING_STACK_CONFIGURED=1
-}
-  if [[ ${#packages[@]} -eq 0 ]]; then
-    warn "No installable gaming packages detected after filtering."
-    return
-  fi
-
-  local -a deduped=()
-  declare -A seen=()
-  local pkg
-  for pkg in "${packages[@]}"; do
-    if [[ -n "$pkg" && -z ${seen[$pkg]+x} ]]; then
-      deduped+=("$pkg")
-      seen[$pkg]=1
-    fi
-  done
-
-  install_packages "Installing selected gaming packages..." "${deduped[@]}"
 }
 
 select_install_disk() {
