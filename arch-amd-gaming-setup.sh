@@ -126,6 +126,234 @@ err() {
   printf '[x] %s\n' "$1" >&2
 }
 
+init_ui() {
+  if command -v dialog >/dev/null 2>&1 && [[ -n "${TERM:-}" && $TERM != "dumb" ]]; then
+    UI_MODE="dialog"
+  else
+    UI_MODE="text"
+  fi
+}
+
+ui_cancelled() {
+  err "Operation cancelled by user."
+  exit 1
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local default_answer="${2:-n}"
+  local normalized="${default_answer,,}"
+
+  if [[ $UI_MODE == "dialog" ]]; then
+    local -a extra=()
+    if [[ $normalized == n* ]]; then
+      extra+=(--defaultno)
+    fi
+    if dialog --title "$UI_TITLE" "${extra[@]}" --yesno "$prompt" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH"; then
+      return 0
+    fi
+    return 1
+  fi
+
+  while true; do
+    local answer
+    read -r -p "$prompt [y/n] (default: ${normalized:-n}): " answer
+    answer="${answer:-$normalized}"
+    case "${answer,,}" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *) echo "Please answer y or n." ;;
+    esac
+  done
+}
+
+prompt_text_input() {
+  local prompt="$1"
+  local default_value="${2:-}"
+  local input
+
+  if [[ $UI_MODE == "dialog" ]]; then
+    input=$(dialog --title "$UI_TITLE" --inputbox "$prompt" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH" "$default_value" --stdout) || ui_cancelled
+  else
+    read -r -p "$prompt${default_value:+ [$default_value]}: " input
+    input="${input:-$default_value}"
+  fi
+
+  printf '%s' "$input"
+}
+
+prompt_hostname() {
+  while true; do
+    local value
+    value=$(prompt_text_input "Hostname" "$BASE_HOSTNAME")
+    value="${value,,}"
+    value="${value// /-}"
+    if [[ -n "$value" ]]; then
+      BASE_HOSTNAME="$value"
+      break
+    fi
+    echo "Hostname cannot be empty."
+  done
+}
+
+prompt_timezone() {
+  while true; do
+    local tz
+    tz=$(prompt_text_input "Timezone (Region/City)" "$BASE_TIMEZONE")
+    if [[ -n "$tz" ]]; then
+      BASE_TIMEZONE="$tz"
+      break
+    fi
+    echo "Timezone cannot be empty."
+  done
+}
+
+prompt_locale() {
+  while true; do
+    local locale
+    locale=$(prompt_text_input "Locale (e.g., en_US.UTF-8)" "$BASE_LOCALE")
+    if [[ -n "$locale" ]]; then
+      BASE_LOCALE="$locale"
+      break
+    fi
+    echo "Locale cannot be empty."
+  done
+}
+
+prompt_username() {
+  while true; do
+    local username
+    username=$(prompt_text_input "New user name" "$BASE_USERNAME")
+    username="${username,,}"
+    if [[ -n "$username" && $username =~ ^[a-z][-a-z0-9_]*$ ]]; then
+      BASE_USERNAME="$username"
+      break
+    fi
+    echo "Enter a lowercase username (letters, numbers, -, _)."
+  done
+}
+
+prompt_password() {
+  local var_name="$1"
+  local label="${2:-user}"
+  local pass1=""
+  local pass2=""
+
+  while true; do
+    if [[ $UI_MODE == "dialog" ]]; then
+      pass1=$(dialog --title "$UI_TITLE" --insecure --passwordbox "Enter password for $label" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH" --stdout) || ui_cancelled
+      pass2=$(dialog --title "$UI_TITLE" --insecure --passwordbox "Confirm password for $label" "$UI_BOX_HEIGHT" "$UI_BOX_WIDTH" --stdout) || ui_cancelled
+    else
+      read -rs -p "Password for $label: " pass1; echo
+      read -rs -p "Confirm password for $label: " pass2; echo
+    fi
+
+    if [[ -z "$pass1" ]]; then
+      echo "Password cannot be empty."
+      continue
+    fi
+    if [[ "$pass1" != "$pass2" ]]; then
+      echo "Passwords do not match. Try again."
+      continue
+    fi
+    printf -v "$var_name" '%s' "$pass1"
+    break
+  done
+
+  pass1=""
+  pass2=""
+}
+
+detect_current_boot_mode() {
+  if [[ -d /sys/firmware/efi ]]; then
+    printf 'uefi'
+  else
+    printf 'bios'
+  fi
+}
+
+run_root_cmd() {
+  if [[ $EUID -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+install_packages() {
+  local message="$1"
+  shift || true
+  if [[ $# -eq 0 ]]; then
+    return
+  fi
+  log "$message"
+  run_root_cmd pacman -S "${PACMAN_FLAGS[@]}" "$@"
+}
+
+update_system() {
+  log "Updating system packages..."
+  run_root_cmd pacman -Syu "${PACMAN_FLAGS[@]}"
+}
+
+detect_multilib() {
+  local conf="/etc/pacman.conf"
+  if grep -Eq '^[[:space:]]*\[multilib\]' "$conf" && grep -Eq '^[[:space:]]*Include[[:space:]]*=.*multilib' "$conf"; then
+    MULTILIB_ENABLED=1
+  else
+    MULTILIB_ENABLED=0
+  fi
+}
+
+enable_multilib() {
+  local conf="/etc/pacman.conf"
+  detect_multilib
+  if [[ $MULTILIB_ENABLED -eq 1 ]]; then
+    log "Multilib repository already enabled."
+    return
+  fi
+
+  local backup="${conf}.bak.$(date +%Y%m%d%H%M%S)"
+  run_root_cmd cp "$conf" "$backup"
+  run_root_cmd bash -c "sed -i 's/^#[[:space:]]*\([[:space:]]*\[multilib\]\)/\1/' '$conf'"
+  run_root_cmd bash -c "sed -i 's/^#[[:space:]]*\(Include[[:space:]]*=.*multilib.*\)/\1/' '$conf'"
+  run_root_cmd pacman -Sy
+  detect_multilib
+  if [[ $MULTILIB_ENABLED -eq 1 ]]; then
+    log "Multilib repository enabled."
+  else
+    warn "Failed to enable multilib repository automatically."
+  fi
+}
+
+ensure_multilib_for_gaming() {
+  detect_multilib
+  if [[ $MULTILIB_ENABLED -eq 1 ]]; then
+    return 0
+  fi
+  warn "Multilib repository disabled; 32-bit gaming components will be skipped."
+  return 1
+}
+
+check_prereqs() {
+  require_command pacman "pacman is required"
+  require_command systemctl "systemctl is required"
+  if [[ $EUID -ne 0 ]]; then
+    require_command sudo "sudo is required for privileged operations"
+  fi
+}
+
+check_base_install_prereqs() {
+  if [[ $EUID -ne 0 ]]; then
+    err "Full install mode must be run as root."
+    exit 1
+  fi
+  local -a required=(lsblk sgdisk mkfs.ext4 mkfs.fat pacstrap arch-chroot)
+  local cmd
+  for cmd in "${required[@]}"; do
+    require_command "$cmd" "$cmd is required for full installation"
+  done
+}
+
 select_gaming_components() {
   local -a selections=("${GAMING_COMPONENTS_SELECTED[@]}")
   if [[ $UI_MODE == "dialog" ]]; then
@@ -181,18 +409,6 @@ select_gaming_components() {
     esac
   done
   GAMING_COMPONENTS_SELECTED=("${filtered[@]}")
-}
-  if [[ $BOOT_MODE == "bios" && $detected == "uefi" ]]; then
-    warn "Legacy BIOS mode selected even though UEFI is available."
-  fi
-}
-
-    case "${answer,,}" in
-      y|yes) return 0 ;;
-      n|no) return 1 ;;
-      *) echo "Please answer y or n." ;;
-    esac
-  done
 }
 
 require_command() {
@@ -368,19 +584,6 @@ select_run_mode() {
     RUN_MODE="postinstall"
   fi
   log "Auto-detected run mode: $RUN_MODE"
-}
-
-    if [[ -z "$pass1" ]]; then
-      echo "Password cannot be empty."
-      continue
-    fi
-    if [[ "$pass1" != "$pass2" ]]; then
-      echo "Passwords do not match. Try again."
-      continue
-    fi
-    printf -v "$var_name" '%s' "$pass1"
-    break
-  done
 }
 
 select_existing_user() {
