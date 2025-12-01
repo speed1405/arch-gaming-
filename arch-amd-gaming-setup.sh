@@ -29,6 +29,7 @@ AUTO_GAMING_INSTALL=${AUTO_GAMING_INSTALL:-0}
 AUTO_ENABLE_FLATPAK=${AUTO_ENABLE_FLATPAK:-0}
 AUTO_ENABLE_AUR=${AUTO_ENABLE_AUR:-0}
 AUTO_INSTALL_AUR_OPTIONALS=${AUTO_INSTALL_AUR_OPTIONALS:-0}
+AUTO_INSTALL_ZEN_KERNEL=${AUTO_INSTALL_ZEN_KERNEL:-0}
 RUN_MODE="postinstall"
 MOUNTPOINT="/mnt"
 BASE_DISK=""
@@ -639,6 +640,11 @@ collect_fullstack_preferences() {
     fi
   fi
 
+  AUTO_INSTALL_ZEN_KERNEL=0
+  if prompt_yes_no "Install linux-zen kernel automatically?" "y"; then
+    AUTO_INSTALL_ZEN_KERNEL=1
+  fi
+
   PRESEED_TEMP_FILE=$(mktemp)
   cat >"$PRESEED_TEMP_FILE" <<EOF
 AUTO_SELECT_DESKTOP=$AUTO_SELECT_DESKTOP
@@ -650,6 +656,7 @@ AUTO_ENABLE_FLATPAK=$AUTO_ENABLE_FLATPAK
 AUTO_ENABLE_AUR=$AUTO_ENABLE_AUR
 AUTO_INSTALL_AUR_OPTIONALS=$AUTO_INSTALL_AUR_OPTIONALS
 AUR_HELPER_SELECTION="$AUR_HELPER_SELECTION"
+AUTO_INSTALL_ZEN_KERNEL=$AUTO_INSTALL_ZEN_KERNEL
 EOF
 }
 
@@ -1118,7 +1125,7 @@ configure_swapfile() {
     return
   fi
   run_root_cmd swapon "$path"
-  if run_root_cmd grep -q "^$path[[:space:]]" /etc/fstab; then
+  if run_root_cmd grep -q "^${path}[[:space:]]" /etc/fstab; then
     log "Swap entry for $path already present in /etc/fstab."
   else
     printf '%s\n' "$path none swap defaults 0 0" | run_root_cmd tee -a /etc/fstab >/dev/null
@@ -1362,8 +1369,8 @@ install_desktop_environment() {
   install_packages "Installing $label desktop environment..." "${packages[@]}"
 
   if [[ -n "$dm_service" ]]; then
-    log "Enabling display manager $dm_service..."
-    run_root_cmd systemctl enable --now "$dm_service"
+    log "Enabling display manager $dm_service (will start on next boot)..."
+    run_root_cmd systemctl enable "$dm_service"
   fi
 
   if [[ $GAMING_STACK_INSTALLED -eq 0 ]]; then
@@ -1384,8 +1391,12 @@ install_desktop_environment() {
 }
 
 install_linux_zen() {
-  if ! prompt_yes_no "Install linux-zen kernel and headers?" "n"; then
-    return
+  if [[ $AUTO_INSTALL_ZEN_KERNEL -ne 1 ]]; then
+    if ! prompt_yes_no "Install linux-zen kernel and headers?" "y"; then
+      return
+    fi
+  else
+    log "Auto-installing linux-zen kernel per preseed."
   fi
   install_packages "Installing linux-zen kernel..." linux-zen linux-zen-headers
   if command -v grub-mkconfig >/dev/null 2>&1; then
@@ -1823,14 +1834,21 @@ post_install_validation() {
     fi
 
     if is_gaming_component_selected "dxvk"; then
-      if pacman -Qi dxvk-bin >/dev/null 2>&1; then
-        status="OK"; note="dxvk-bin package installed"
+      if pacman -Qi dxvk >/dev/null 2>&1; then
+        status="OK"; note="dxvk package installed"
       else
-        status="WARN"; note="Install with 'sudo pacman -S dxvk-bin' after enabling multilib"
+        status="WARN"; note="Install with 'sudo pacman -S dxvk' after enabling multilib"
       fi
       add_validation_result validation_lines "DXVK" "$status" "$note" ok warn_count fail info
     fi
   fi
+
+  if pacman -Qi linux-zen >/dev/null 2>&1; then
+    status="OK"; note="linux-zen kernel installed"
+  else
+    status="INFO"; note="Standard kernel in use (consider linux-zen for gaming)"
+  fi
+  add_validation_result validation_lines "Kernel (Zen)" "$status" "$note" ok warn_count fail info
 
   if command -v systemctl >/dev/null 2>&1; then
     if systemctl is-active --quiet NetworkManager.service >/dev/null 2>&1; then
@@ -1872,6 +1890,15 @@ post_install_validation() {
   fi
   add_validation_result validation_lines "AUR helper" "$status" "$note" ok warn_count fail info
 
+  if [[ $ENABLE_AUR -eq 1 ]]; then
+    if pacman -Qi protonup-qt >/dev/null 2>&1; then
+      status="OK"; note="protonup-qt installed"
+    else
+      status="INFO"; note="protonup-qt not installed"
+    fi
+    add_validation_result validation_lines "ProtonUp-Qt" "$status" "$note" ok warn_count fail info
+  fi
+
   local report_body="No validation checks were run."
   if ((${#validation_lines[@]} > 0)); then
     report_body=$(printf '%s\n' "${validation_lines[@]}")
@@ -1895,8 +1922,9 @@ post_install_validation() {
 post_install_summary() {
   cat <<'EOF'
 
-Setup complete! Recommended next steps:
-  • Reboot to use the new kernel/microcode if installed.
+Setup complete! A reboot is required to start the desktop environment and load new drivers.
+Recommended next steps:
+  • Reboot your system now ('sudo reboot').
   • Launch Steam and enable Proton Experimental under Settings > Steam Play.
   • Run ProtonUp-Qt to install the latest GE-Proton builds.
   • Use MangoHud (F12) and GOverlay to fine-tune overlays.
@@ -1920,6 +1948,7 @@ run_post_install() {
   • Install core gaming stack (Steam, Lutris, Wine, etc.)
   • (Optional) Configure Flatpak + Flathub
   • (Optional) Enable AUR helper + install Heroic/ProtonUp
+  • (Optional) Install Zen Kernel (linux-zen)
 ==============================================
 EOF
 
