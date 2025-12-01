@@ -441,6 +441,28 @@ select_gaming_components() {
   GAMING_COMPONENTS_SELECTED=("${filtered[@]}")
 }
 
+configure_gaming_packages() {
+  if ! prompt_yes_no "Install the gaming stack (Steam, Lutris, Wine, etc.)?" "y"; then
+    INSTALL_GAMING=0
+    GAMING_COMPONENTS_SELECTED=()
+    warn "Skipping gaming stack installation per user choice."
+    return
+  fi
+
+  INSTALL_GAMING=1
+  if prompt_yes_no "Customize which gaming components to install?" "n"; then
+    select_gaming_components
+  else
+    GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
+  fi
+
+  if [[ ${#GAMING_COMPONENTS_SELECTED[@]} -eq 0 ]]; then
+    warn "No gaming components selected; set will be skipped later unless you re-run this step."
+  else
+    log "Selected gaming components: ${GAMING_COMPONENTS_SELECTED[*]}"
+  fi
+}
+
 require_command() {
   local cmd="$1"
   local msg="$2"
@@ -1199,32 +1221,6 @@ install_amd_stack() {
     xf86-video-amdgpu
   )
   install_packages "Installing AMD GPU stack..." "${amd_packages[@]}"
-}
-
-install_gaming_packages() {
-  local gaming_packages=(
-    steam
-    steam-native-runtime
-    gamemode
-    mangohud
-    goverlay
-    lutris
-    wine
-    wine-mono
-    wine-gecko
-    openxr-loader
-    pipewire
-    pipewire-alsa
-    pipewire-pulse
-    pipewire-jack
-    qpwgraph
-  )
-  if [[ $MULTILIB_ENABLED -eq 1 ]]; then
-    gaming_packages+=(dxvk-bin)
-  else
-    warn "Skipping dxvk-bin because multilib is disabled."
-  fi
-  install_packages "Installing core gaming packages..." "${gaming_packages[@]}"
 }
 
 configure_gamemode() {
