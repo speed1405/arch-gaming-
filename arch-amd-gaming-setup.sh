@@ -198,6 +198,17 @@ run_in_chroot() {
   arch-chroot "$TARGET_MOUNT" bash -c "$1"
 }
 
+set_password_in_chroot() {
+  local user="$1"
+  local password="$2"
+  local tmpfile
+  tmpfile=$(mktemp)
+  chmod 600 "$tmpfile"
+  printf '%s:%s\n' "$user" "$password" >"$tmpfile"
+  arch-chroot "$TARGET_MOUNT" chpasswd <"$tmpfile"
+  rm -f "$tmpfile"
+}
+
 configure_locale_timezone() {
   TARGET_TIMEZONE=$(prompt "Timezone (Region/City)" "$TARGET_TIMEZONE")
   TARGET_LOCALE=$(prompt "Locale" "$TARGET_LOCALE")
@@ -221,11 +232,11 @@ EOF
 
 create_users() {
   ROOT_PASSWORD=$(prompt_hidden "Root password")
-  printf 'root:%s\n' "$ROOT_PASSWORD" | arch-chroot "$TARGET_MOUNT" chpasswd
+  set_password_in_chroot root "$ROOT_PASSWORD"
   TARGET_USERNAME=$(prompt "Primary username" "$TARGET_USERNAME")
   run_in_chroot "useradd -m -G wheel,audio,video,storage $TARGET_USERNAME"
   USER_PASSWORD=$(prompt_hidden "Password for $TARGET_USERNAME")
-  printf '%s:%s\n' "$TARGET_USERNAME" "$USER_PASSWORD" | arch-chroot "$TARGET_MOUNT" chpasswd
+  set_password_in_chroot "$TARGET_USERNAME" "$USER_PASSWORD"
   run_in_chroot "usermod -aG wheel $TARGET_USERNAME"
   run_in_chroot "sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers"
 }
