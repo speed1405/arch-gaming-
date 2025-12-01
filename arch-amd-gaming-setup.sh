@@ -281,7 +281,7 @@ run_in_chroot() {
 set_password_in_chroot() {
   local user="$1"
   local password="$2"
-  printf '%s:%s\n' "$user" "$password" | chpasswd --root "$TARGET_MOUNT"
+  printf '%s:%s\n' "$user" "$password" | arch-chroot "$TARGET_MOUNT" chpasswd
 }
 
 configure_locale_timezone() {
