@@ -255,28 +255,26 @@ create_users() {
 
 enable_multilib() {
   run_in_chroot "sed -i 's/^#\s*\[multilib\]/[multilib]/' /etc/pacman.conf"
-  run_in_chroot "bash -c 'awk \''BEGIN{in_multilib=0; have_include=0}
+  run_in_chroot "bash -c 'awk \''BEGIN{in_mult=0; have_inc=0}
     /^\\s*\\[/ {
-      if (in_multilib && !have_include) {
+      if (in_mult && !have_inc) {
         print "Include = /etc/pacman.d/mirrorlist"
       }
-      in_multilib = ($0 ~ /^\\s*\\[multilib\\]/)
-      have_include = 0
+      in_mult = ($0 ~ /^\\s*\\[multilib\\]/)
+      have_inc = 0
       print
       next
     }
     {
-      if (in_multilib && $0 ~ /Include\\s*=\\s*\\/etc\\/pacman.d\\/mirrorlist/) {
-        have_include = 1
-        print
-      } else if (in_multilib && $0 ~ /^\\s*Include\\s*=/) {
+      if (in_mult && $0 ~ /Include\\s*=\\s*\\/etc\\/pacman.d\\/mirrorlist/) {
+        have_inc = 1
+      } else if (in_mult && $0 ~ /^\\s*Include\\s*=/) {
         next
-      } else {
-        print
       }
+      print
     }
     END {
-      if (in_multilib && !have_include) {
+      if (in_mult && !have_inc) {
         print "Include = /etc/pacman.d/mirrorlist"
       }
     }
