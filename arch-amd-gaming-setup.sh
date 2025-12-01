@@ -1104,6 +1104,7 @@ install_desktop_environment() {
   local label=""
   local dm_service=""
   local -a packages=()
+  local terminal_pkg=""
 
   case "$DESKTOP_CHOICE" in
     skip|"")
@@ -1114,27 +1115,36 @@ install_desktop_environment() {
       label="GNOME"
       packages=(gnome gnome-tweaks gnome-shell-extensions gdm power-profiles-daemon)
       dm_service="gdm.service"
+      terminal_pkg="gnome-terminal"
       ;;
     plasma)
       label="KDE Plasma"
       packages=(plasma-meta kde-applications sddm sddm-kcm)
       dm_service="sddm.service"
+      terminal_pkg="konsole"
       ;;
     xfce)
       label="Xfce"
       packages=(xfce4 xfce4-goodies lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings)
       dm_service="lightdm.service"
+      terminal_pkg="xfce4-terminal"
       ;;
     cinnamon)
       label="Cinnamon"
       packages=(cinnamon lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings)
       dm_service="lightdm.service"
+      terminal_pkg="gnome-terminal"
       ;;
     *)
       warn "Unknown desktop selection '$DESKTOP_CHOICE'. Skipping."
       return
       ;;
   esac
+
+  if [[ -n "$terminal_pkg" ]]; then
+    log "Adding default terminal $terminal_pkg for $label."
+    packages+=("$terminal_pkg")
+  fi
 
   install_packages "Installing $label desktop environment..." "${packages[@]}"
 
