@@ -201,11 +201,12 @@ EOF
 
 create_users() {
   ROOT_PASSWORD=$(prompt_hidden "Root password")
-  printf 'root:%s\n' "$ROOT_PASSWORD" | run_in_chroot chpasswd
+  printf 'root:%s\n' "$ROOT_PASSWORD" | arch-chroot "$TARGET_MOUNT" chpasswd
   TARGET_USERNAME=$(prompt "Primary username" "$TARGET_USERNAME")
   run_in_chroot "useradd -m -G wheel,audio,video,storage $TARGET_USERNAME"
   USER_PASSWORD=$(prompt_hidden "Password for $TARGET_USERNAME")
-  printf '%s:%s\n' "$TARGET_USERNAME" "$USER_PASSWORD" | run_in_chroot chpasswd
+  printf '%s:%s\n' "$TARGET_USERNAME" "$USER_PASSWORD" | arch-chroot "$TARGET_MOUNT" chpasswd
+  run_in_chroot "usermod -aG wheel $TARGET_USERNAME"
   run_in_chroot "sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers"
 }
 
@@ -224,6 +225,18 @@ install_kernel_options() {
   if prompt_yes_no "Install the linux-zen kernel in addition to the default kernel?" "y"; then
     run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} linux-zen linux-zen-headers"
   fi
+
+  if prompt_yes_no "Install the linux-cachyos kernel from AUR?" "n"; then
+    install_linux_cachyos
+  fi
+}
+
+install_linux_cachyos() {
+  log "Building linux-cachyos kernel from AUR (this may take a while)..."
+  run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} git"
+  run_in_chroot "su - $TARGET_USERNAME -c 'git clone https://aur.archlinux.org/linux-cachyos.git ~/linux-cachyos'"
+  run_in_chroot "su - $TARGET_USERNAME -c 'cd ~/linux-cachyos && makepkg -si --noconfirm'"
+  run_in_chroot "su - $TARGET_USERNAME -c 'rm -rf ~/linux-cachyos'"
 }
 
 select_desktop_environment() {
@@ -319,9 +332,9 @@ main() {
   enable_multilib
   install_kernel_options
   install_amd_stack
+  install_gaming_stack
   select_desktop_environment
   install_desktop_environment
-  install_gaming_stack
   install_aur_helper
   install_bootloader
   cleanup
