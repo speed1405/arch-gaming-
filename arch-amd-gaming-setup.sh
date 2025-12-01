@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
 set -Eeuo pipefail
 
 # Minimal Arch Linux installer tuned for AMD gaming systems.
