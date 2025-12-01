@@ -705,11 +705,26 @@ prompt_disk_selection() {
 
   local choice
   while true; do
-    read -r -p "$prompt [1-${#disk_entries[@]}]: " choice
+    read -r -p "$prompt [1-${#disk_entries[@]} or device path]: " choice
+    if [[ -z "$choice" ]]; then
+      choice="1"
+    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#disk_entries[@]})); then
       printf '%s' "${disk_entries[choice-1]%% *}"
       return
     fi
+
+    local candidate="$choice"
+    if [[ $candidate != /dev/* ]]; then
+      candidate="/dev/${candidate}"  # allow entering bare device names like sda
+    fi
+    for entry in "${disk_entries[@]}"; do
+      name="${entry%% *}"
+      if [[ "$candidate" == "$name" ]]; then
+        printf '%s' "$name"
+        return
+      fi
+    done
     echo "Invalid selection, try again."
   done
 }
