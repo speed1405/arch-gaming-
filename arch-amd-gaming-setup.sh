@@ -159,10 +159,16 @@ format_partitions() {
 }
 
 mount_partitions() {
+  if mountpoint -q "$TARGET_MOUNT" 2>/dev/null; then
+    umount -R "$TARGET_MOUNT"
+  fi
+  mkdir -p "$TARGET_MOUNT"
+  if mountpoint -q "$TARGET_MOUNT/boot" 2>/dev/null; then
+    umount "$TARGET_MOUNT/boot"
+  fi
   mount "$ROOT_PART" "$TARGET_MOUNT"
   mkdir -p "$TARGET_MOUNT/boot"
   if [[ -n "$EFI_PART" ]]; then
-    mkdir -p "$TARGET_MOUNT/boot"
     mount "$EFI_PART" "$TARGET_MOUNT/boot"
   fi
 }
