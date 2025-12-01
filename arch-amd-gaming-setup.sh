@@ -424,9 +424,6 @@ require_command() {
 # Package Management & System Preparation
 # ================================================================
 
-  return 1
-}
-
 optimize_mirrors() {
   if ! prompt_yes_no "Optimize pacman mirrors for speed using reflector?" "y"; then
     return
