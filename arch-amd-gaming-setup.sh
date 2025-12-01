@@ -340,10 +340,13 @@ install_aur_helper() {
     return
   fi
   run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} git"
+  run_in_chroot "bash -c 'echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/00-aur-installer'"
+  run_in_chroot "chmod 440 /etc/sudoers.d/00-aur-installer"
   run_in_chroot "su - $TARGET_USERNAME -c 'git clone https://aur.archlinux.org/${AUR_HELPER}.git ~/aur-helper'"
   run_in_chroot "su - $TARGET_USERNAME -c 'cd ~/aur-helper && makepkg -si --noconfirm'"
   run_in_chroot "su - $TARGET_USERNAME -c 'rm -rf ~/aur-helper'"
   run_in_chroot "su - $TARGET_USERNAME -c '$AUR_HELPER -S --noconfirm protonup-qt heroic-games-launcher-bin'"
+  run_in_chroot "rm -f /etc/sudoers.d/00-aur-installer"
 }
 
 install_bootloader() {
