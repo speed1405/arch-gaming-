@@ -152,6 +152,7 @@ partition_disk() {
 }
 
 format_partitions() {
+  unmount_existing_mounts "$ROOT_PART" "$EFI_PART"
   if [[ -n "$EFI_PART" ]]; then
     mkfs.fat -F32 "$EFI_PART"
   fi
