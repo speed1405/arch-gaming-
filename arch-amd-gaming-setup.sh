@@ -244,7 +244,32 @@ create_users() {
 
 enable_multilib() {
   run_in_chroot "sed -i 's/^#\s*\[multilib\]/[multilib]/' /etc/pacman.conf"
-  run_in_chroot "sed -i 's/^#\s*Include = \/etc\/pacman.d\/mirrorlist/Include = \/etc\/pacman.d\/mirrorlist/' /etc/pacman.conf"
+  run_in_chroot "awk 'BEGIN{in_multilib=0; have_include=0}
+    /^\s*\[/ {
+      if (in_multilib && !have_include) {
+        print "Include = /etc/pacman.d/mirrorlist"
+      }
+      in_multilib = ($0 ~ /^\s*\[multilib\]/)
+      have_include = 0
+      print
+      next
+    }
+    {
+      if (in_multilib && $0 ~ /Include\s*=\s*\/etc\/pacman.d\/mirrorlist/) {
+        have_include = 1
+        print
+      } else if (in_multilib && $0 ~ /^\s*Include\s*=/) {
+        next
+      } else {
+        print
+      }
+    }
+    END {
+      if (in_multilib && !have_include) {
+        print "Include = /etc/pacman.d/mirrorlist"
+      }
+    }
+  ' /etc/pacman.conf > /etc/pacman.conf.tmp && mv /etc/pacman.conf.tmp /etc/pacman.conf"
   run_in_chroot "pacman -Sy"
 }
 
@@ -317,7 +342,7 @@ install_desktop_environment() {
 }
 
 install_gaming_stack() {
-  local packages=(steam steam-native-runtime lutris wine winetricks gamemode lib32-gamemode mangohud lib32-mangohud pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber flatpak)
+  local packages=(steam lutris wine winetricks gamemode lib32-gamemode mangohud lib32-mangohud pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber flatpak)
   run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} ${packages[*]}"
   run_in_chroot "systemctl enable --global gamemoded.service >/dev/null 2>&1 || true"
   run_in_chroot "flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo"
