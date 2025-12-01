@@ -25,6 +25,8 @@ USER_PASSWORD=""
 ROOT_PASSWORD=""
 DESKTOP_CHOICE="gnome"
 AUR_HELPER="paru"
+UI_TITLE="Arch AMD Gaming Setup"
+USE_ZENITY=0
 
 log() { printf '[+] %s\n' "$1"; }
 warn() { printf '[!] %s\n' "$1" >&2; }
@@ -38,10 +40,28 @@ require_cmd() {
   done
 }
 
+init_ui() {
+  if command -v zenity >/dev/null 2>&1; then
+    USE_ZENITY=1
+  else
+    USE_ZENITY=0
+  fi
+}
+
 prompt() {
   local prompt_text="$1"
   local default_value="${2:-}"
   local value
+  if [[ $USE_ZENITY -eq 1 ]]; then
+    if [[ -n "$default_value" ]]; then
+      value=$(zenity --entry --title "$UI_TITLE" --text "$prompt_text" --entry-text "$default_value" 2>/dev/null) || err "Operation cancelled."
+      value="${value:-$default_value}"
+    else
+      value=$(zenity --entry --title "$UI_TITLE" --text "$prompt_text" 2>/dev/null) || err "Operation cancelled."
+    fi
+    printf '%s' "$value"
+    return
+  fi
   if [[ -n "$default_value" ]]; then
     read -r -p "$prompt_text [$default_value]: " value
     value="${value:-$default_value}"
@@ -55,10 +75,15 @@ prompt_hidden() {
   local prompt_text="$1"
   local first second
   while true; do
+    if [[ $USE_ZENITY -eq 1 ]]; then
+      first=$(zenity --entry --title "$UI_TITLE" --text "$prompt_text" --hide-text 2>/dev/null) || err "Operation cancelled."
+      second=$(zenity --entry --title "$UI_TITLE" --text "Confirm $prompt_text" --hide-text 2>/dev/null) || err "Operation cancelled."
+    else
     read -r -s -p "$prompt_text: " first
     printf '\n'
     read -r -s -p "Confirm $prompt_text: " second
     printf '\n'
+    fi
     if [[ "$first" == "$second" && -n "$first" ]]; then
       printf '%s' "$first"
       return
@@ -71,6 +96,17 @@ prompt_yes_no() {
   local prompt_text="$1"
   local default_answer="${2:-y}"
   local choice
+  if [[ $USE_ZENITY -eq 1 ]]; then
+    local -a zenity_args=(--question --title "$UI_TITLE" --text "$prompt_text")
+    case "${default_answer,,}" in
+      y|yes) zenity_args+=(--default "ok") ;;
+      *) zenity_args+=(--default "cancel") ;;
+    esac
+    if zenity "${zenity_args[@]}" 2>/dev/null; then
+      return 0
+    fi
+    return 1
+  fi
   while true; do
     read -r -p "$prompt_text [${default_answer^^}/$( [[ $default_answer == y ]] && echo "n" || echo "Y" )]: " choice
     choice="${choice:-$default_answer}"
@@ -86,7 +122,7 @@ check_environment() {
   if [[ $EUID -ne 0 ]]; then
     err "Run this installer as root."
   fi
-  require_cmd pacstrap arch-chroot lsblk sgdisk mkfs.ext4 mkfs.fat findmnt openssl
+  require_cmd pacstrap arch-chroot lsblk sgdisk mkfs.ext4 mkfs.fat findmnt openssl chpasswd
   if ! mountpoint -q "$TARGET_MOUNT"; then
     mkdir -p "$TARGET_MOUNT"
   fi
@@ -116,17 +152,34 @@ select_boot_mode() {
 }
 
 select_target_disk() {
-  log "Available disks:"
-  lsblk -dpno NAME,SIZE,MODEL | nl -ba
-  local choice
-  while true; do
-    read -r -p "Enter disk device path (e.g., /dev/sda, /dev/nvme0n1): " choice
-    if [[ -b "$choice" ]]; then
-      TARGET_DISK="$choice"
-      break
-    fi
-    warn "Invalid block device."
-  done
+  if [[ $USE_ZENITY -eq 1 ]]; then
+    local -a rows=()
+    local first=1
+    while read -r name size; do
+      [[ -z "$name" ]] && continue
+      if [[ $first -eq 1 ]]; then
+        rows+=("TRUE" "$name" "$size")
+        first=0
+      else
+        rows+=("FALSE" "$name" "$size")
+      fi
+    done < <(lsblk -dpno NAME,SIZE)
+    local selection
+    selection=$(zenity --list --radiolist --title "$UI_TITLE" --text "Select target disk (all data will be wiped)" --column "Selected" --column "Disk" --column "Size" "${rows[@]}" 2>/dev/null) || err "Operation cancelled."
+    TARGET_DISK="$selection"
+  else
+    log "Available disks:"
+    lsblk -dpno NAME,SIZE,MODEL | nl -ba
+    local choice
+    while true; do
+      read -r -p "Enter disk device path (e.g., /dev/sda, /dev/nvme0n1): " choice
+      if [[ -b "$choice" ]]; then
+        TARGET_DISK="$choice"
+        break
+      fi
+      warn "Invalid block device."
+    done
+  fi
   log "Selected disk: $TARGET_DISK"
   if ! prompt_yes_no "This will erase ALL data on $TARGET_DISK. Continue?" "n"; then
     err "Installation cancelled."
@@ -207,13 +260,7 @@ run_in_chroot() {
 set_password_in_chroot() {
   local user="$1"
   local password="$2"
-  local hash
-  hash=$(openssl passwd -6 "$password")
-  local escaped_hash
-  escaped_hash=$(printf '%q' "$hash")
-  local escaped_user
-  escaped_user=$(printf '%q' "$user")
-  run_in_chroot "usermod -p $escaped_hash $escaped_user"
+  printf '%s:%s\n' "$user" "$password" | chpasswd --root "$TARGET_MOUNT"
 }
 
 configure_locale_timezone() {
