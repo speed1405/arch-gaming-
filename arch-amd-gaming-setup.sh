@@ -58,6 +58,7 @@ Arch AMD Gaming Setup
 Usage: ./arch-amd-gaming-setup.sh [--mode postinstall|fullinstall]
   --mode postinstall   Force post-install flow (skip auto-detection)
   --mode fullinstall   Force full disk install (requires root on live ISO)
+  --preseed <path>     Load automation/preseed answers from a file
   -h, --help           Show this help message
 EOF
 }
@@ -75,6 +76,18 @@ parse_cli_args() {
         ;;
       --mode=*)
         FORCED_RUN_MODE="${1#*=}"
+        shift
+        ;;
+      --preseed)
+        if [[ $# -lt 2 ]]; then
+          err "--preseed requires a file path"
+          exit 1
+        fi
+        PRESEED_PATH="$2"
+        shift 2
+        ;;
+      --preseed=*)
+        PRESEED_PATH="${1#*=}"
         shift
         ;;
       -h|--help)
@@ -113,6 +126,31 @@ detect_timezone_default() {
   if [[ -n "$detected" ]]; then
     BASE_TIMEZONE="$detected"
   fi
+}
+
+load_preseed_answers() {
+  if [[ -z "$PRESEED_PATH" ]]; then
+    return
+  fi
+  if [[ ! -f "$PRESEED_PATH" ]]; then
+    warn "Preseed file $PRESEED_PATH not found; ignoring."
+    PRESEED_PATH=""
+    return
+  fi
+  log "Loading preseed answers from $PRESEED_PATH"
+  # shellcheck disable=SC1090
+  source "$PRESEED_PATH"
+
+  if [[ -n "${GAMING_COMPONENTS_SELECTED_SERIALIZED:-}" ]]; then
+    IFS=',' read -r -a GAMING_COMPONENTS_SELECTED <<<"${GAMING_COMPONENTS_SELECTED_SERIALIZED// /}"
+    GAMING_COMPONENTS_PRESELECTED=1
+  fi
+
+  AUTO_SELECT_DESKTOP=${AUTO_SELECT_DESKTOP:-0}
+  AUTO_GAMING_INSTALL=${AUTO_GAMING_INSTALL:-0}
+  AUTO_ENABLE_FLATPAK=${AUTO_ENABLE_FLATPAK:-0}
+  AUTO_ENABLE_AUR=${AUTO_ENABLE_AUR:-0}
+  AUTO_INSTALL_AUR_OPTIONALS=${AUTO_INSTALL_AUR_OPTIONALS:-0}
 }
 
 # ================================================================
@@ -454,6 +492,17 @@ configure_gaming_packages() {
       GAMING_COMPONENTS_SELECTED=()
       warn "Skipping gaming stack installation per user choice."
       GAMING_STACK_CONFIGURED=1
+      AUR_SUPPORT_CONFIGURED=0
+      AUR_OPTIONAL_APPS_INSTALLED=0
+      AUTO_SELECT_DESKTOP=0
+      AUTO_GAMING_INSTALL=0
+      AUTO_ENABLE_FLATPAK=0
+      AUTO_ENABLE_AUR=0
+      AUTO_INSTALL_AUR_OPTIONALS=0
+      GAMING_COMPONENTS_PRESELECTED=0
+      PRESEED_PATH="${ARCH_SETUP_PRESEED:-}"
+      PRESEED_TEMP_FILE=""
+      PRESEED_TARGET_PATH=""
       return
     fi
   fi
@@ -471,6 +520,11 @@ configure_gaming_packages() {
     log "Selected gaming components: ${GAMING_COMPONENTS_SELECTED[*]}"
   fi
   GAMING_STACK_CONFIGURED=1
+}
+
+serialize_gaming_components() {
+  local IFS=','
+  printf '%s' "${GAMING_COMPONENTS_SELECTED[*]}"
 }
 
 install_gaming_stack_flow() {
@@ -495,6 +549,64 @@ install_gaming_stack_flow() {
   else
     warn "Multilib disabled; cannot install full gaming stack right now."
   fi
+}
+
+collect_fullstack_preferences() {
+  AUTO_SELECT_DESKTOP=1
+  select_desktop_environment
+
+  if prompt_yes_no "Install the gaming stack automatically after base install?" "y"; then
+    AUTO_GAMING_INSTALL=1
+    if prompt_yes_no "Customize gaming components now?" "n"; then
+      select_gaming_components
+    else
+      GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
+    fi
+    GAMING_COMPONENTS_PRESELECTED=1
+  else
+    AUTO_GAMING_INSTALL=0
+  fi
+
+  AUTO_ENABLE_FLATPAK=0
+  if prompt_yes_no "Install Flatpak + Flathub automatically?" "y"; then
+    AUTO_ENABLE_FLATPAK=1
+  fi
+
+  AUTO_ENABLE_AUR=0
+  AUTO_INSTALL_AUR_OPTIONALS=0
+  if prompt_yes_no "Enable an AUR helper automatically?" "y"; then
+    AUTO_ENABLE_AUR=1
+    select_aur_helper
+    if prompt_yes_no "Also install Heroic Launcher + ProtonUp automatically?" "y"; then
+      AUTO_INSTALL_AUR_OPTIONALS=1
+    fi
+  fi
+
+  PRESEED_TEMP_FILE=$(mktemp)
+  cat >"$PRESEED_TEMP_FILE" <<EOF
+AUTO_SELECT_DESKTOP=$AUTO_SELECT_DESKTOP
+DESKTOP_CHOICE="$DESKTOP_CHOICE"
+AUTO_GAMING_INSTALL=$AUTO_GAMING_INSTALL
+GAMING_COMPONENTS_PRESELECTED=$GAMING_COMPONENTS_PRESELECTED
+GAMING_COMPONENTS_SELECTED_SERIALIZED="$(serialize_gaming_components)"
+AUTO_ENABLE_FLATPAK=$AUTO_ENABLE_FLATPAK
+AUTO_ENABLE_AUR=$AUTO_ENABLE_AUR
+AUTO_INSTALL_AUR_OPTIONALS=$AUTO_INSTALL_AUR_OPTIONALS
+AUR_HELPER_SELECTION="$AUR_HELPER_SELECTION"
+EOF
+}
+
+persist_preseed_to_target() {
+  if [[ -z "$PRESEED_TEMP_FILE" || ! -f "$PRESEED_TEMP_FILE" ]]; then
+    return
+  fi
+  local config_dir="$MOUNTPOINT/home/$BASE_USERNAME/.config/arch-amd-gaming"
+  local dest="$config_dir/preseed.conf"
+  install -Dm600 "$PRESEED_TEMP_FILE" "$dest"
+  arch-chroot "$MOUNTPOINT" chown -R "$BASE_USERNAME:$BASE_USERNAME" "/home/$BASE_USERNAME/.config/arch-amd-gaming"
+  PRESEED_TARGET_PATH="/home/$BASE_USERNAME/.config/arch-amd-gaming/preseed.conf"
+  rm -f "$PRESEED_TEMP_FILE"
+  PRESEED_TEMP_FILE=""
 }
 
 require_command() {
@@ -785,32 +897,38 @@ prompt_disk_selection() {
   done
 }
 
-install_gaming_packages() {
-  if [[ ${#GAMING_COMPONENTS_SELECTED[@]} -eq 0 ]]; then
-    warn "No gaming components selected; skipping package installation."
-    return
+configure_gaming_packages() {
+  local auto_enable="${1:-0}"
+  local force_install=$((auto_enable == 1 || AUTO_GAMING_INSTALL == 1 ? 1 : 0))
+
+  if [[ $force_install -ne 1 ]]; then
+    if ! prompt_yes_no "Install the gaming stack (Steam, Lutris, Wine, etc.)?" "y"; then
+      INSTALL_GAMING=0
+      GAMING_COMPONENTS_SELECTED=()
+      warn "Skipping gaming stack installation per user choice."
+      GAMING_STACK_CONFIGURED=1
+      return
+    fi
   fi
 
-  local -a packages=()
-  for component in "${GAMING_COMPONENTS_SELECTED[@]}"; do
-    case "$component" in
-      steam) packages+=(steam steam-native-runtime) ;;
-      lutris) packages+=(lutris) ;;
-      wine) packages+=(wine wine-mono wine-gecko) ;;
-      gamemode) packages+=(gamemode) ;;
-      mangohud) packages+=(mangohud goverlay) ;;
-      pipewire) packages+=(pipewire pipewire-alsa pipewire-pulse pipewire-jack qpwgraph) ;;
-      openxr) packages+=(openxr-loader vulkan-tools) ;;
-      dxvk)
-        if [[ $MULTILIB_ENABLED -eq 1 ]]; then
-          packages+=(dxvk-bin)
-        else
-          warn "Skipping DXVK because multilib is disabled."
-        fi
-        ;;
-    esac
-  done
+  INSTALL_GAMING=1
+  if [[ $GAMING_COMPONENTS_PRESELECTED -eq 1 && ${#GAMING_COMPONENTS_SELECTED[@]} -gt 0 ]]; then
+    log "Using preselected gaming components: ${GAMING_COMPONENTS_SELECTED[*]}"
+  else
+    if prompt_yes_no "Customize which gaming components to install?" "n"; then
+      select_gaming_components
+    else
+      GAMING_COMPONENTS_SELECTED=("${DEFAULT_GAMING_COMPONENTS[@]}")
+    fi
+  fi
 
+  if [[ ${#GAMING_COMPONENTS_SELECTED[@]} -eq 0 ]]; then
+    warn "No gaming components selected; set will be skipped later unless you re-run this step."
+  else
+    log "Selected gaming components: ${GAMING_COMPONENTS_SELECTED[*]}"
+  fi
+  GAMING_STACK_CONFIGURED=1
+}
   if [[ ${#packages[@]} -eq 0 ]]; then
     warn "No installable gaming packages detected after filtering."
     return
@@ -1060,7 +1178,11 @@ run_post_install_inside_target() {
 
   log "Launching post-install configuration inside the new system..."
   local inner_script="./$(basename "$user_script")"
-  local chroot_cmd="cd /home/$BASE_USERNAME && $inner_script --mode postinstall"
+  local env_prefix=""
+  if [[ -n "$PRESEED_TARGET_PATH" ]]; then
+    env_prefix="ARCH_SETUP_PRESEED='$PRESEED_TARGET_PATH' "
+  fi
+  local chroot_cmd="cd /home/$BASE_USERNAME && ${env_prefix}${inner_script} --mode postinstall"
   if ! arch-chroot "$MOUNTPOINT" runuser -l "$BASE_USERNAME" -c "$chroot_cmd"; then
     warn "Post-install phase inside target system exited with an error. You can rerun $user_script after reboot."
   else
@@ -1103,6 +1225,12 @@ run_full_arch_install() {
   prompt_hostname
   prompt_timezone
   prompt_locale
+  if prompt_yes_no "After the base install completes, continue automatically with desktop/gaming/AUR setup?" "y"; then
+    AUTORUN_POSTINSTALL=1
+    collect_fullstack_preferences
+  else
+    AUTORUN_POSTINSTALL=0
+  fi
   select_install_boot_mode
   select_install_disk
   confirm_disk_wipe
@@ -1115,6 +1243,9 @@ run_full_arch_install() {
   install_optional_fwupd_in_chroot
   configure_system_in_chroot
   copy_script_to_new_install
+  if [[ $AUTORUN_POSTINSTALL -eq 1 ]]; then
+    persist_preseed_to_target
+  fi
   run_post_install_inside_target
   cleanup_mounts
   trap - EXIT
@@ -1130,6 +1261,10 @@ EOF
 }
 
 select_desktop_environment() {
+  if [[ $AUTO_SELECT_DESKTOP -eq 1 && -n "$DESKTOP_CHOICE" ]]; then
+    log "Using preselected desktop environment: $DESKTOP_CHOICE"
+    return
+  fi
   if ! prompt_yes_no "Install a desktop environment?" "n"; then
     DESKTOP_CHOICE="skip"
     return
@@ -1307,9 +1442,13 @@ setup_flatpak() {
     log "Flatpak already configured; skipping."
     return
   fi
-  if ! prompt_yes_no "Install Flatpak and enable Flathub?" "y"; then
-    FLATPAK_CONFIGURED=1
-    return
+  if [[ $AUTO_ENABLE_FLATPAK -ne 1 ]]; then
+    if ! prompt_yes_no "Install Flatpak and enable Flathub?" "y"; then
+      FLATPAK_CONFIGURED=1
+      return
+    fi
+  else
+    log "Auto-enabling Flatpak + Flathub per preseed."
   fi
   install_packages "Installing Flatpak..." flatpak
   if ! flatpak remote-list | grep -q flathub; then
@@ -1350,6 +1489,10 @@ ensure_aur_helper_present() {
 }
 
 select_aur_helper() {
+  if [[ $AUTO_ENABLE_AUR -eq 1 && -n "$AUR_HELPER_SELECTION" ]]; then
+    log "Using preselected AUR helper: $AUR_HELPER_SELECTION"
+    return
+  fi
   local options=(paru yay)
   if [[ $UI_MODE == "dialog" ]]; then
     local menu_entries=()
@@ -1399,14 +1542,18 @@ install_selected_aur_helper() {
 }
 
 configure_aur_support() {
-  if ! prompt_yes_no "Enable AUR helper support (install helper + optional packages)?" "y"; then
-    ENABLE_AUR=0
-    warn "AUR support disabled; skipping community utilities."
-    if prompt_yes_no "Install an AUR helper anyway for manual use?" "n"; then
-      ensure_aur_helper_present || warn "Unable to provision an AUR helper."
+  if [[ $AUTO_ENABLE_AUR -ne 1 ]]; then
+    if ! prompt_yes_no "Enable AUR helper support (install helper + optional packages)?" "y"; then
+      ENABLE_AUR=0
+      warn "AUR support disabled; skipping community utilities."
+      if prompt_yes_no "Install an AUR helper anyway for manual use?" "n"; then
+        ensure_aur_helper_present || warn "Unable to provision an AUR helper."
+      fi
+      AUR_SUPPORT_CONFIGURED=1
+      return
     fi
-    AUR_SUPPORT_CONFIGURED=1
-    return
+  else
+    log "Auto-enabling AUR helper support per preseed."
   fi
 
   ENABLE_AUR=1
@@ -1444,7 +1591,13 @@ configure_aur_support_flow() {
 
   if [[ $ENABLE_AUR -eq 1 ]]; then
     if [[ $AUR_OPTIONAL_APPS_INSTALLED -eq 0 ]]; then
-      if prompt_yes_no "Install Heroic Launcher + ProtonUp from AUR?" "y"; then
+      local install_optionals=0
+      if [[ $AUTO_INSTALL_AUR_OPTIONALS -eq 1 ]]; then
+        install_optionals=1
+      elif prompt_yes_no "Install Heroic Launcher + ProtonUp from AUR?" "y"; then
+        install_optionals=1
+      fi
+      if [[ $install_optionals -eq 1 ]]; then
         install_aur_packages
         AUR_OPTIONAL_APPS_INSTALLED=1
       fi
@@ -1797,6 +1950,7 @@ EOF
 main() {
   parse_cli_args "$@"
   detect_timezone_default
+  load_preseed_answers
   init_ui
   select_run_mode
   if [[ $RUN_MODE == "fullinstall" ]]; then
