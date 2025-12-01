@@ -26,7 +26,7 @@ ROOT_PASSWORD=""
 DESKTOP_CHOICE="gnome"
 AUR_HELPER="paru"
 UI_TITLE="Arch AMD Gaming Setup"
-USE_ZENITY=0
+UI_BACKEND="text"
 
 log() { printf '[+] %s\n' "$1"; }
 warn() { printf '[!] %s\n' "$1" >&2; }
@@ -41,10 +41,9 @@ require_cmd() {
 }
 
 init_ui() {
-  if command -v zenity >/dev/null 2>&1; then
-    USE_ZENITY=1
-  else
-    USE_ZENITY=0
+  UI_BACKEND="text"
+  if command -v whiptail >/dev/null 2>&1; then
+    UI_BACKEND="whiptail"
   fi
 }
 
@@ -52,22 +51,25 @@ prompt() {
   local prompt_text="$1"
   local default_value="${2:-}"
   local value
-  if [[ $USE_ZENITY -eq 1 ]]; then
-    if [[ -n "$default_value" ]]; then
-      value=$(zenity --entry --title "$UI_TITLE" --text "$prompt_text" --entry-text "$default_value" 2>/dev/null) || err "Operation cancelled."
-      value="${value:-$default_value}"
-    else
-      value=$(zenity --entry --title "$UI_TITLE" --text "$prompt_text" 2>/dev/null) || err "Operation cancelled."
-    fi
-    printf '%s' "$value"
-    return
-  fi
-  if [[ -n "$default_value" ]]; then
-    read -r -p "$prompt_text [$default_value]: " value
-    value="${value:-$default_value}"
-  else
-    read -r -p "$prompt_text: " value
-  fi
+  case "$UI_BACKEND" in
+    whiptail)
+      value=$(whiptail --title "$UI_TITLE" --inputbox "$prompt_text" 10 60 "$default_value" 3>&1 1>&2 2>&3)
+      if [[ $? -ne 0 ]]; then
+        err "Operation cancelled."
+      fi
+      if [[ -z "$value" && -n "$default_value" ]]; then
+        value="$default_value"
+      fi
+      ;;
+    *)
+      if [[ -n "$default_value" ]]; then
+        read -r -p "$prompt_text [$default_value]: " value
+        value="${value:-$default_value}"
+      else
+        read -r -p "$prompt_text: " value
+      fi
+      ;;
+  esac
   printf '%s' "$value"
 }
 
@@ -75,15 +77,24 @@ prompt_hidden() {
   local prompt_text="$1"
   local first second
   while true; do
-    if [[ $USE_ZENITY -eq 1 ]]; then
-      first=$(zenity --entry --title "$UI_TITLE" --text "$prompt_text" --hide-text 2>/dev/null) || err "Operation cancelled."
-      second=$(zenity --entry --title "$UI_TITLE" --text "Confirm $prompt_text" --hide-text 2>/dev/null) || err "Operation cancelled."
-    else
-    read -r -s -p "$prompt_text: " first
-    printf '\n'
-    read -r -s -p "Confirm $prompt_text: " second
-    printf '\n'
-    fi
+    case "$UI_BACKEND" in
+      whiptail)
+        first=$(whiptail --title "$UI_TITLE" --passwordbox "$prompt_text" 10 60 3>&1 1>&2 2>&3)
+        if [[ $? -ne 0 ]]; then
+          err "Operation cancelled."
+        fi
+        second=$(whiptail --title "$UI_TITLE" --passwordbox "Confirm $prompt_text" 10 60 3>&1 1>&2 2>&3)
+        if [[ $? -ne 0 ]]; then
+          err "Operation cancelled."
+        fi
+        ;;
+      *)
+        read -r -s -p "$prompt_text: " first
+        printf '\n'
+        read -r -s -p "Confirm $prompt_text: " second
+        printf '\n'
+        ;;
+    esac
     if [[ "$first" == "$second" && -n "$first" ]]; then
       printf '%s' "$first"
       return
@@ -96,26 +107,30 @@ prompt_yes_no() {
   local prompt_text="$1"
   local default_answer="${2:-y}"
   local choice
-  if [[ $USE_ZENITY -eq 1 ]]; then
-    local -a zenity_args=(--question --title "$UI_TITLE" --text "$prompt_text")
-    case "${default_answer,,}" in
-      y|yes) zenity_args+=(--default "ok") ;;
-      *) zenity_args+=(--default "cancel") ;;
-    esac
-    if zenity "${zenity_args[@]}" 2>/dev/null; then
-      return 0
-    fi
-    return 1
-  fi
-  while true; do
-    read -r -p "$prompt_text [${default_answer^^}/$( [[ $default_answer == y ]] && echo "n" || echo "Y" )]: " choice
-    choice="${choice:-$default_answer}"
-    case "${choice,,}" in
-      y|yes) return 0 ;;
-      n|no) return 1 ;;
-    esac
-    echo "Please answer yes or no."
-  done
+  case "$UI_BACKEND" in
+    whiptail)
+      local -a whiptail_args=(--title "$UI_TITLE" --yesno "$prompt_text" 10 60)
+      case "${default_answer,,}" in
+        y|yes) ;;
+        *) whiptail_args+=(--defaultno) ;;
+      esac
+      if whiptail "${whiptail_args[@]}" 3>&1 1>&2 2>&3; then
+        return 0
+      fi
+      return 1
+      ;;
+    *)
+      while true; do
+        read -r -p "$prompt_text [${default_answer^^}/$( [[ ${default_answer,,} == y || ${default_answer,,} == yes ]] && echo "n" || echo "Y" )]: " choice
+        choice="${choice:-$default_answer}"
+        case "${choice,,}" in
+          y|yes) return 0 ;;
+          n|no) return 1 ;;
+        esac
+        echo "Please answer yes or no."
+      done
+      ;;
+  esac
 }
 
 check_environment() {
@@ -138,13 +153,15 @@ select_boot_mode() {
   if prompt_yes_no "Override detected boot mode?" "n"; then
     local choice
     while true; do
-      read -r -p "Enter boot mode (uefi/bios): " choice
+      choice=$(prompt "Enter boot mode (uefi/bios)" "$BOOT_MODE")
       case "${choice,,}" in
         uefi|bios)
           BOOT_MODE="${choice,,}"
           break
           ;;
-        *) echo "Invalid entry." ;;
+        *)
+          warn "Invalid entry."
+          ;;
       esac
     done
   fi
@@ -152,34 +169,38 @@ select_boot_mode() {
 }
 
 select_target_disk() {
-  if [[ $USE_ZENITY -eq 1 ]]; then
-    local -a rows=()
-    local first=1
-    while read -r name size; do
-      [[ -z "$name" ]] && continue
-      if [[ $first -eq 1 ]]; then
-        rows+=("TRUE" "$name" "$size")
-        first=0
-      else
-        rows+=("FALSE" "$name" "$size")
+  case "$UI_BACKEND" in
+    whiptail)
+      local -a rows=()
+      while read -r name size; do
+        [[ -z "$name" ]] && continue
+        rows+=("$name" "$size" "OFF")
+      done < <(lsblk -dpno NAME,SIZE)
+      if [[ ${#rows[@]} -lt 3 ]]; then
+        err "No disks detected."
       fi
-    done < <(lsblk -dpno NAME,SIZE)
-    local selection
-    selection=$(zenity --list --radiolist --title "$UI_TITLE" --text "Select target disk (all data will be wiped)" --column "Selected" --column "Disk" --column "Size" "${rows[@]}" 2>/dev/null) || err "Operation cancelled."
-    TARGET_DISK="$selection"
-  else
-    log "Available disks:"
-    lsblk -dpno NAME,SIZE,MODEL | nl -ba
-    local choice
-    while true; do
-      read -r -p "Enter disk device path (e.g., /dev/sda, /dev/nvme0n1): " choice
-      if [[ -b "$choice" ]]; then
-        TARGET_DISK="$choice"
-        break
+      rows[2]="ON"
+      local selection
+      selection=$(whiptail --title "$UI_TITLE" --radiolist "Select target disk (all data will be wiped)" 15 70 6 "${rows[@]}" 3>&1 1>&2 2>&3)
+      if [[ $? -ne 0 || -z "$selection" ]]; then
+        err "Operation cancelled."
       fi
-      warn "Invalid block device."
-    done
-  fi
+      TARGET_DISK="$selection"
+      ;;
+    *)
+      log "Available disks:"
+      lsblk -dpno NAME,SIZE,MODEL | nl -ba
+      local choice
+      while true; do
+        read -r -p "Enter disk device path (e.g., /dev/sda, /dev/nvme0n1): " choice
+        if [[ -b "$choice" ]]; then
+          TARGET_DISK="$choice"
+          break
+        fi
+        warn "Invalid block device."
+      done
+      ;;
+  esac
   log "Selected disk: $TARGET_DISK"
   if ! prompt_yes_no "This will erase ALL data on $TARGET_DISK. Continue?" "n"; then
     err "Installation cancelled."
@@ -331,24 +352,43 @@ install_linux_cachyos() {
 }
 
 select_desktop_environment() {
-  echo "Desktop options:"
-  echo "  1) GNOME"
-  echo "  2) KDE Plasma"
-  echo "  3) Xfce"
-  echo "  4) Cinnamon"
-  echo "  5) Skip"
-  local choice
-  while true; do
-    read -r -p "Select desktop [1-5]: " choice
-    case "$choice" in
-      1) DESKTOP_CHOICE="gnome"; break ;;
-      2) DESKTOP_CHOICE="plasma"; break ;;
-      3) DESKTOP_CHOICE="xfce"; break ;;
-      4) DESKTOP_CHOICE="cinnamon"; break ;;
-      5) DESKTOP_CHOICE="none"; break ;;
-      *) echo "Invalid selection." ;;
-    esac
-  done
+  case "$UI_BACKEND" in
+    whiptail)
+      local selection
+      selection=$(whiptail --title "$UI_TITLE" --menu "Select desktop environment" 18 70 6 \
+        "gnome" "GNOME" \
+        "plasma" "KDE Plasma" \
+        "xfce" "Xfce" \
+        "cinnamon" "Cinnamon" \
+        "none" "Skip" 3>&1 1>&2 2>&3)
+      if [[ $? -ne 0 ]]; then
+        warn "No selection made; defaulting to GNOME."
+        DESKTOP_CHOICE="gnome"
+      else
+        DESKTOP_CHOICE="$selection"
+      fi
+      ;;
+    *)
+      echo "Desktop options:"
+      echo "  1) GNOME"
+      echo "  2) KDE Plasma"
+      echo "  3) Xfce"
+      echo "  4) Cinnamon"
+      echo "  5) Skip"
+      local choice
+      while true; do
+        read -r -p "Select desktop [1-5]: " choice
+        case "$choice" in
+          1) DESKTOP_CHOICE="gnome"; break ;;
+          2) DESKTOP_CHOICE="plasma"; break ;;
+          3) DESKTOP_CHOICE="xfce"; break ;;
+          4) DESKTOP_CHOICE="cinnamon"; break ;;
+          5) DESKTOP_CHOICE="none"; break ;;
+          *) echo "Invalid selection." ;;
+        esac
+      done
+      ;;
+  esac
 }
 
 install_desktop_environment() {
@@ -413,6 +453,7 @@ cleanup() {
 }
 
 main() {
+  init_ui
   check_environment
   select_boot_mode
   select_target_disk
