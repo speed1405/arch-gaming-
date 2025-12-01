@@ -543,6 +543,19 @@ select_bootloader_mode_choice() {
   printf '%s' "$selection"
 }
 
+select_install_boot_mode() {
+  local selection
+  selection=$(select_bootloader_mode_choice "Select boot mode for the new installation")
+  BOOT_MODE="$selection"
+  local detected
+  detected=$(detect_current_boot_mode)
+  if [[ $BOOT_MODE == "bios" && $detected == "uefi" ]]; then
+    warn "Legacy BIOS install selected while firmware is in UEFI mode; ensure this is intentional."
+  elif [[ $BOOT_MODE == "uefi" && $detected == "bios" ]]; then
+    warn "UEFI install selected but system booted in BIOS/Legacy mode; installation will only boot via UEFI."
+  fi
+}
+
 run_bios_bootloader_setup() {
   ensure_local_bios_packages
   local boot_disk
