@@ -314,8 +314,38 @@ enable_multilib() {
 
   local backup="${conf}.bak.$(date +%Y%m%d%H%M%S)"
   run_root_cmd cp "$conf" "$backup"
-  run_root_cmd bash -c "sed -i 's/^#[[:space:]]*\([[:space:]]*\[multilib\]\)/\1/' '$conf'"
-  run_root_cmd bash -c "sed -i 's/^#[[:space:]]*\(Include[[:space:]]*=.*multilib.*\)/\1/' '$conf'"
+  run_root_cmd bash -s "$conf" <<'EOF'
+set -euo pipefail
+conf="$1"
+if ! grep -Eq '^[[:space:]]*\[multilib\]' "$conf"; then
+  printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> "$conf"
+else
+  sed -i 's/^#[[:space:]]*\(\[multilib\]\)/\1/' "$conf"
+  if grep -Eq '^[[:space:]]*Include[[:space:]]*=.*multilib' "$conf"; then
+    sed -i 's/^#[[:space:]]*\(Include[[:space:]]*=.*multilib.*\)/\1/' "$conf"
+  else
+    awk -v add='Include = /etc/pacman.d/mirrorlist' '
+      BEGIN{inserted=0}
+      /^\s*\[multilib\]/ {
+        print
+        if (!inserted) {
+          print add
+          inserted=1
+        }
+        next
+      }
+      {print}
+      END{
+        if (!inserted) {
+          print "[multilib]"
+          print add
+        }
+      }
+    ' "$conf" > "${conf}.tmp"
+    mv "${conf}.tmp" "$conf"
+  fi
+fi
+EOF
   run_root_cmd pacman -Sy
   detect_multilib
   if [[ $MULTILIB_ENABLED -eq 1 ]]; then
