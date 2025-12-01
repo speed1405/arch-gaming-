@@ -80,7 +80,7 @@ check_environment() {
   if [[ $EUID -ne 0 ]]; then
     err "Run this installer as root."
   fi
-  require_cmd pacstrap arch-chroot lsblk sgdisk mkfs.ext4 mkfs.fat findmnt
+  require_cmd pacstrap arch-chroot lsblk sgdisk mkfs.ext4 mkfs.fat findmnt openssl
   if ! mountpoint -q "$TARGET_MOUNT"; then
     mkdir -p "$TARGET_MOUNT"
   fi
@@ -201,12 +201,13 @@ run_in_chroot() {
 set_password_in_chroot() {
   local user="$1"
   local password="$2"
-  local tmpfile
-  tmpfile=$(mktemp)
-  chmod 600 "$tmpfile"
-  printf '%s:%s\n' "$user" "$password" >"$tmpfile"
-  arch-chroot "$TARGET_MOUNT" chpasswd <"$tmpfile"
-  rm -f "$tmpfile"
+  local hash
+  hash=$(openssl passwd -6 "$password")
+  local escaped_hash
+  escaped_hash=$(printf '%q' "$hash")
+  local escaped_user
+  escaped_user=$(printf '%q' "$user")
+  run_in_chroot "usermod -p $escaped_hash $escaped_user"
 }
 
 configure_locale_timezone() {
