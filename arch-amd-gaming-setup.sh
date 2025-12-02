@@ -62,7 +62,40 @@ init_ui() {
 }
 
 show_help_section() {
-  local help_text=$'Installer Help\n\nProfiles:\n  - Guided setup: manual prompts for every decision.\n  - Gaming desktop: GNOME + linux-zen tuned for dedicated rigs.\n  - Performance desktop: Plasma + linux-zen + CachyOS with Gamescope/VR extras.\n  - Lightweight laptop: Xfce with defaults geared for portability.\n\nKernel options:\n  - linux-zen: low-latency kernel that improves gaming responsiveness.\n  - linux-cachyos: AUR build with extra desktop optimisations (longer install).\n\nDesktops & window managers:\n  - GNOME / Plasma / Xfce / Cinnamon provide full-featured desktops.\n  - i3 / Sway offer lightweight tiling window managers.\n\nGraphics stack:\n  - AMD GPUs receive Mesa/Vulkan packages automatically.\n  - NVIDIA GPUs trigger a dedicated helper script for proprietary drivers.\n\nOptional extras:\n  - Streaming, emulation, creative, and system utility bundles can be toggled.\n\nDisks & partitioning:\n  - The selected disk is fully wiped and repartitioned.\n  - The pre-flight summary lets you review choices before changes occur.\n\nNavigation tips:\n  - Whiptail dialogs: arrow keys move, Tab switches buttons, Enter confirms.\n  - Text mode: type responses exactly as shown (yes/no, option names).'
+  local help_text
+  help_text=$(cat <<'HELP'
+Installer Help
+
+Profiles:
+  - Guided setup: manual prompts for every decision.
+  - Gaming desktop: GNOME + linux-zen tuned for dedicated rigs.
+  - Performance desktop: Plasma + linux-zen + CachyOS with Gamescope/VR extras.
+  - Lightweight laptop: Xfce with defaults geared for portability.
+
+Kernel options:
+  - linux-zen: low-latency kernel that improves gaming responsiveness.
+  - linux-cachyos: AUR build with extra desktop optimisations (longer install).
+
+Desktops & window managers:
+  - GNOME / Plasma / Xfce / Cinnamon provide full-featured desktops.
+  - i3 / Sway offer lightweight tiling window managers.
+
+Graphics stack:
+  - AMD GPUs receive Mesa/Vulkan packages automatically.
+  - NVIDIA GPUs trigger a dedicated helper script for proprietary drivers.
+
+Optional extras:
+  - Streaming, emulation, creative, and system utility bundles can be toggled.
+
+Disks & partitioning:
+  - The selected disk is fully wiped and repartitioned.
+  - The pre-flight summary lets you review choices before changes occur.
+
+Navigation tips:
+  - Whiptail dialogs: arrow keys move, Tab switches buttons, Enter confirms.
+  - Text mode: type responses exactly as shown (yes/no, option names).
+HELP
+  )
 
   case "$UI_BACKEND" in
     whiptail)
@@ -76,7 +109,17 @@ show_help_section() {
 }
 
 show_quick_start_guide() {
-  local guide=$'Quick Start Guide\n\n1. Connect to the internet (use `iwctl` for Wi-Fi or plug in Ethernet).\n2. Optionally run `pacman -Sy dialog` to enable guided whiptail dialogs.\n3. Copy or download this script to the live environment.\n4. Make it executable: `chmod +x arch-amd-gaming-setup.sh`.\n5. Launch it as root: `./arch-amd-gaming-setup.sh`.'
+  local guide
+  guide=$(cat <<'GUIDE'
+Quick Start Guide
+
+1. Connect to the internet (use `iwctl` for Wi-Fi or plug in Ethernet).
+2. Optionally run `pacman -Sy dialog` to enable guided whiptail dialogs.
+3. Copy or download this script to the live environment.
+4. Make it executable: `chmod +x arch-amd-gaming-setup.sh`.
+5. Launch it as root: `./arch-amd-gaming-setup.sh`.
+GUIDE
+  )
   case "$UI_BACKEND" in
     whiptail)
       whiptail --title "$UI_TITLE" --msgbox "$guide" 20 70
@@ -337,7 +380,10 @@ apply_profile() {
   case "$profile" in
     gaming-gnome)
       PROFILE_NAME="Gaming desktop (GNOME)"
-      PROFILE_DESCRIPTION=$'Desktop: GNOME\nKernel: linux + linux-zen\nNotes: Great for dedicated gaming rigs with AMD graphics.'
+      printf -v PROFILE_DESCRIPTION '%s\n%s\n%s' \
+        'Desktop: GNOME' \
+        'Kernel: linux + linux-zen' \
+        'Notes: Great for dedicated gaming rigs with AMD graphics.'
       DESKTOP_CHOICE="gnome"
       TARGET_HOSTNAME="arch-gaming"
       INSTALL_LINUX_ZEN="yes"
@@ -346,7 +392,10 @@ apply_profile() {
       ;;
     performance-plasma)
       PROFILE_NAME="Performance desktop (Plasma)"
-      PROFILE_DESCRIPTION=$'Desktop: KDE Plasma\nKernel: linux + linux-zen + linux-cachyos\nNotes: Adds Gamescope and OpenXR/OpenVR runtimes for high-refresh rigs.'
+      printf -v PROFILE_DESCRIPTION '%s\n%s\n%s' \
+        'Desktop: KDE Plasma' \
+        'Kernel: linux + linux-zen + linux-cachyos' \
+        'Notes: Adds Gamescope and OpenXR/OpenVR runtimes for high-refresh rigs.'
       DESKTOP_CHOICE="plasma"
       TARGET_HOSTNAME="arch-perf"
       INSTALL_LINUX_ZEN="yes"
@@ -356,7 +405,10 @@ apply_profile() {
       ;;
     lightweight-xfce)
       PROFILE_NAME="Lightweight laptop (Xfce)"
-      PROFILE_DESCRIPTION=$'Desktop: Xfce\nKernel: linux only\nNotes: Balanced defaults aimed at portable systems.'
+      printf -v PROFILE_DESCRIPTION '%s\n%s\n%s' \
+        'Desktop: Xfce' \
+        'Kernel: linux only' \
+        'Notes: Balanced defaults aimed at portable systems.'
       DESKTOP_CHOICE="xfce"
       TARGET_HOSTNAME="arch-lite"
       INSTALL_LINUX_ZEN="no"
