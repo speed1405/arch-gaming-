@@ -156,13 +156,15 @@ prompt_hidden() {
   done
 }
 
-        local input_line
-        read -r -p "Select numbers separated by spaces (Enter to skip): " input_line
-        local -a input_choices=()
-        read -ra input_choices <<< "$input_line"
+prompt_yes_no() {
+  local prompt_text="$1"
+  local default_answer="${2:-y}"
   local help_text="${3:-}"
-        for choice in "${input_choices[@]}"; do
-  default_lower="${default_answer,,}"
+  local choice
+  local display
+  local suffix
+  local default_lower="${default_answer,,}"
+
   case "$UI_BACKEND" in
     whiptail)
       display="$prompt_text"
@@ -377,7 +379,7 @@ select_optional_extras() {
       "streaming" "Streaming & recording (OBS Studio, EasyEffects)" OFF \
       "emulation" "Emulation & retro gaming (RetroArch, Dolphin, PCSX2)" OFF \
       "creative" "Creative tools (Blender, GIMP, Inkscape)" OFF \
-      "sysutils" "System utilities (htop, btop, nvtop)" OFF 3>&1 1>&2 2>&3)
+      "sysutils" "System utilities (htop, btop, fastfetch)" OFF 3>&1 1>&2 2>&3)
     if [[ $? -eq 0 && -n $selection ]]; then
       read -ra selected_tags <<< "$selection"
     fi
@@ -386,7 +388,7 @@ select_optional_extras() {
     echo "  1) Streaming & recording (OBS Studio, EasyEffects)"
     echo "  2) Emulation & retro gaming (RetroArch, Dolphin, PCSX2)"
     echo "  3) Creative tools (Blender, GIMP, Inkscape)"
-    echo "  4) System utilities (htop, btop, nvtop)"
+    echo "  4) System utilities (htop, btop, fastfetch)"
     local input
     read -r -p "Select numbers separated by spaces (Enter to skip): " input
     read -ra input <<< "$input"
