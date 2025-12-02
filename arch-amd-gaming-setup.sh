@@ -850,7 +850,8 @@ install_optional_extras() {
 }
 
 install_aur_helper() {
-  if ! prompt_yes_no "Install AUR helper ($AUR_HELPER) and ProtonUp-Qt?" "y" "Installs $AUR_HELPER along with ProtonUp-Qt and Heroic from the AUR."; then
+  if ! prompt_yes_no "Install AUR helper ($AUR_HELPER)?" "y" "Installs $AUR_HELPER for managing packages from the AUR."; then
+    log "Skipping AUR helper installation."
     return
   fi
   run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} git"
@@ -859,7 +860,56 @@ install_aur_helper() {
   run_in_chroot "su - $TARGET_USERNAME -c 'git clone https://aur.archlinux.org/${AUR_HELPER}.git ~/aur-helper'"
   run_in_chroot "su - $TARGET_USERNAME -c 'cd ~/aur-helper && makepkg -si --noconfirm'"
   run_in_chroot "su - $TARGET_USERNAME -c 'rm -rf ~/aur-helper'"
-  run_in_chroot "su - $TARGET_USERNAME -c '$AUR_HELPER -S --noconfirm protonup-qt heroic-games-launcher-bin'"
+  run_in_chroot "rm -f /etc/sudoers.d/00-aur-installer"
+  log "Installed $AUR_HELPER."
+}
+
+install_protonup_and_heroic() {
+  if ! prompt_yes_no "Install ProtonUp-Qt and Heroic Games Launcher?" "y" "Installs ProtonUp-Qt for managing Proton versions and the Heroic launcher for Epic/GOG."; then
+    log "Skipping ProtonUp-Qt and Heroic installation."
+    return
+  fi
+
+  local -a pacman_targets=()
+  local -a aur_targets=()
+  local pkg
+
+  if run_in_chroot "pacman -Si protonup-qt >/dev/null 2>&1"; then
+    pacman_targets+=("protonup-qt")
+  else
+    aur_targets+=("protonup-qt")
+  fi
+
+  if run_in_chroot "pacman -Si heroic-games-launcher >/dev/null 2>&1"; then
+    pacman_targets+=("heroic-games-launcher")
+  else
+    aur_targets+=("heroic-games-launcher-bin")
+  fi
+
+  if ((${#pacman_targets[@]} > 0)); then
+    log "Installing ${pacman_targets[*]} from official repositories."
+    run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} ${pacman_targets[*]}"
+  fi
+
+  if ((${#aur_targets[@]} == 0)); then
+    return
+  fi
+
+  if run_in_chroot "command -v $AUR_HELPER >/dev/null 2>&1"; then
+    log "Using $AUR_HELPER to install ${aur_targets[*]} from the AUR."
+    run_in_chroot "su - $TARGET_USERNAME -c '$AUR_HELPER -S --noconfirm ${aur_targets[*]}'"
+    return
+  fi
+
+  warn "Falling back to manual AUR build for ${aur_targets[*]}."
+  run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} git base-devel"
+  run_in_chroot 'bash -c "echo \"%wheel ALL=(ALL:ALL) NOPASSWD: ALL\" > /etc/sudoers.d/00-aur-installer"'
+  run_in_chroot "chmod 440 /etc/sudoers.d/00-aur-installer"
+  for pkg in "${aur_targets[@]}"; do
+    run_in_chroot "su - $TARGET_USERNAME -c 'git clone https://aur.archlinux.org/${pkg}.git ~/aur-${pkg}'"
+    run_in_chroot "su - $TARGET_USERNAME -c 'cd ~/aur-${pkg} && makepkg -si --noconfirm'"
+    run_in_chroot "su - $TARGET_USERNAME -c 'rm -rf ~/aur-${pkg}'"
+  done
   run_in_chroot "rm -f /etc/sudoers.d/00-aur-installer"
 }
 
@@ -910,6 +960,7 @@ main() {
   select_desktop_environment
   install_desktop_environment
   install_aur_helper
+  install_protonup_and_heroic
   install_bootloader
   cleanup
   log "Installation complete. Reboot into your new system."
