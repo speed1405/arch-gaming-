@@ -23,7 +23,7 @@ ROOT_PART=""
 BIOS_BOOT_PART=""
 TARGET_HOSTNAME="arch-gaming"
 TARGET_USERNAME="gamer"
-TARGET_TIMEZONE="UTC"
+TARGET_TIMEZONE="Australia/Sydney"
 TARGET_LOCALE="en_US.UTF-8"
 TARGET_VCONSOLE_KEYMAP="us"
 TARGET_MOUNT="/mnt"
@@ -48,6 +48,7 @@ EXTRA_PACKAGES=()
 SELECTED_EXTRA_LABELS=()
 PROFILE_PACKAGES=()
 DETECTED_GPU_VENDOR="unknown"
+DETECTED_TIMEZONE="Australia/Sydney"
 
 log() { printf '[+] %s\n' "$1"; }
 warn() { printf '[!] %s\n' "$1" >&2; }
@@ -256,7 +257,8 @@ detect_hardware() {
   fi
   [[ -n "$DETECTED_GPU" ]] || DETECTED_GPU="Unknown GPU"
 
-  local gpu_lower=${DETECTED_GPU,,}
+  local gpu_lower
+  gpu_lower=$(printf '%s' "$DETECTED_GPU" | tr '[:upper:]' '[:lower:]')
   case "$gpu_lower" in
     *nvidia*|*0x10de*)
       DETECTED_GPU_VENDOR="nvidia"
@@ -295,6 +297,36 @@ detect_hardware() {
   log "Detected GPU: $DETECTED_GPU"
   log "Detected RAM: $DETECTED_RAM_GB"
   log "Network status: $DETECTED_NETWORK"
+}
+
+detect_timezone() {
+  local tz="" link_target
+
+  if command -v timedatectl >/dev/null 2>&1; then
+    tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+    [[ "$tz" == "n/a" ]] && tz=""
+  fi
+
+  if [[ -z "$tz" ]]; then
+    if [[ -L /etc/localtime ]]; then
+      link_target=$(readlink -f /etc/localtime || true)
+      tz=${link_target#/usr/share/zoneinfo/}
+    elif [[ -f /etc/timezone ]]; then
+      tz=$(< /etc/timezone)
+    fi
+  fi
+
+  if [[ -z "$tz" && -n "$HAS_NETWORK" && $HAS_NETWORK -eq 1 && command -v curl >/dev/null 2>&1 ]]; then
+    tz=$(curl -fsSL --max-time 2 https://ipapi.co/timezone 2>/dev/null || true)
+  fi
+
+  if [[ -n "$tz" ]]; then
+    DETECTED_TIMEZONE="$tz"
+    log "Detected timezone: $DETECTED_TIMEZONE"
+  else
+    DETECTED_TIMEZONE="UTC"
+    log "Falling back to default timezone: $DETECTED_TIMEZONE"
+  fi
 }
 
 apply_profile() {
@@ -534,6 +566,7 @@ preflight_summary() {
   summary+=$'  - GPU: '"$DETECTED_GPU"$'\n'
   summary+=$'  - RAM: '"$DETECTED_RAM_GB"$'\n'
   summary+=$'  - Network: '"$DETECTED_NETWORK"$'\n'
+  summary+=$'  - Detected timezone: '"$DETECTED_TIMEZONE"$'\n'
   summary+=$'  - GPU driver plan: '"$gpu_plan"$'\n'
   summary+=$'Hostname (current default): '"$TARGET_HOSTNAME"$'\n'
   summary+=$'Primary user (current default): '"$TARGET_USERNAME"$'\n'
@@ -709,7 +742,11 @@ set_password_in_chroot() {
 }
 
 configure_locale_timezone() {
-  TARGET_TIMEZONE=$(prompt "Timezone (Region/City)" "$TARGET_TIMEZONE" "Use Region/City format, e.g., Europe/Paris or America/New_York.")
+  local default_timezone="$TARGET_TIMEZONE"
+  if [[ -z "$default_timezone" || "$default_timezone" == "UTC" ]]; then
+    default_timezone="$DETECTED_TIMEZONE"
+  fi
+  TARGET_TIMEZONE=$(prompt "Timezone (Region/City)" "$default_timezone" "Use Region/City format, e.g., Europe/Paris or America/New_York. Detected default: $DETECTED_TIMEZONE")
   TARGET_LOCALE=$(prompt "Locale" "$TARGET_LOCALE" "Matches entries in /etc/locale.gen, e.g., en_US.UTF-8.")
   run_in_chroot "ln -sf /usr/share/zoneinfo/$TARGET_TIMEZONE /etc/localtime"
   run_in_chroot "hwclock --systohc"
@@ -1037,6 +1074,7 @@ main() {
   fi
   check_environment
   detect_hardware
+  detect_timezone
   select_profile
   select_optional_extras
   select_boot_mode
