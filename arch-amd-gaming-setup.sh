@@ -49,6 +49,9 @@ SELECTED_EXTRA_LABELS=()
 PROFILE_PACKAGES=()
 DETECTED_GPU_VENDOR="unknown"
 DETECTED_TIMEZONE="Australia/Sydney"
+WINE_PACKAGE="wine"
+WINE_VARIANT_LABEL="Wine (stable)"
+LIB32_WINE_PACKAGE="lib32-wine"
 
 log() { printf '[+] %s\n' "$1"; }
 warn() { printf '[!] %s\n' "$1" >&2; }
@@ -76,9 +79,8 @@ Kernel options:
   - linux-zen: low-latency kernel that improves gaming responsiveness.
   - linux-cachyos: AUR build with extra desktop optimisations (longer install).
 
-Desktops & window managers:
+Desktop environments:
   - GNOME / Plasma / Xfce / Cinnamon provide full-featured desktops.
-  - i3 / Sway offer lightweight tiling window managers.
 
 Graphics stack:
   - AMD GPUs receive Mesa/Vulkan packages automatically.
@@ -558,13 +560,52 @@ select_optional_extras() {
   log "Selected extras: ${SELECTED_EXTRA_LABELS[*]}"
 }
 
+select_wine_variant() {
+  local selection choice
+  case "$UI_BACKEND" in
+    whiptail)
+      selection=$(whiptail --title "$UI_TITLE" --menu "Select Wine variant" 15 70 2 \
+        "wine" "Wine (stable)" \
+        "wine-staging" "Wine-Staging (bleeding edge updates)" 3>&1 1>&2 2>&3)
+      if [[ $? -ne 0 || -z "$selection" ]]; then
+        selection="wine"
+      fi
+      ;;
+    *)
+      echo "Wine variants:"
+      echo "  1) Wine (stable)"
+      echo "  2) Wine-Staging (bleeding edge updates)"
+      read -r -p "Select variant [1-2, Enter for 1]: " choice
+      case "$choice" in
+        2) selection="wine-staging" ;;
+        *) selection="wine" ;;
+      esac
+      ;;
+  esac
+
+  case "$selection" in
+    wine-staging)
+      WINE_PACKAGE="wine-staging"
+      WINE_VARIANT_LABEL="Wine-Staging"
+      LIB32_WINE_PACKAGE="lib32-wine-staging"
+      ;;
+    *)
+      WINE_PACKAGE="wine"
+      WINE_VARIANT_LABEL="Wine (stable)"
+      LIB32_WINE_PACKAGE="lib32-wine"
+      ;;
+  esac
+
+  log "Wine variant selected: $WINE_VARIANT_LABEL"
+}
+
 preflight_summary() {
   local desktop_info zen_plan cachyos_plan summary extras_text profile_pkg_text gpu_plan
 
   if (( SKIP_DESKTOP_PROMPT )); then
-    desktop_info="Desktop/WM: ${DESKTOP_CHOICE} (from profile)"
+    desktop_info="Desktop environment: ${DESKTOP_CHOICE} (from profile)"
   else
-    desktop_info="Desktop/WM: Will prompt later (current default: ${DESKTOP_CHOICE})"
+    desktop_info="Desktop environment: Will prompt later (current default: ${DESKTOP_CHOICE})"
   fi
 
   case "$INSTALL_LINUX_ZEN" in
@@ -620,6 +661,7 @@ Hardware summary:
   - Network: $DETECTED_NETWORK
   - Detected timezone: $DETECTED_TIMEZONE
   - GPU driver plan: $gpu_plan
+  - Wine variant: $WINE_VARIANT_LABEL
 Hostname (current default): $TARGET_HOSTNAME
 Primary user (current default): $TARGET_USERNAME
 Mount point: $TARGET_MOUNT
@@ -945,8 +987,6 @@ select_desktop_environment() {
         "plasma" "KDE Plasma" \
         "xfce" "Xfce" \
         "cinnamon" "Cinnamon" \
-        "i3" "i3 Window Manager (tiling)" \
-        "sway" "Sway (Wayland tiling WM)" \
         "none" "Skip" 3>&1 1>&2 2>&3)
       if [[ $? -ne 0 ]]; then
         warn "No selection made; defaulting to GNOME."
@@ -961,20 +1001,16 @@ select_desktop_environment() {
       echo "  2) KDE Plasma"
       echo "  3) Xfce"
       echo "  4) Cinnamon"
-      echo "  5) i3 (tiling window manager)"
-      echo "  6) Sway (Wayland tiling window manager)"
-      echo "  7) Skip"
+      echo "  5) Skip"
       local choice
       while true; do
-        read -r -p "Select desktop [1-7]: " choice
+        read -r -p "Select desktop [1-5]: " choice
         case "$choice" in
           1) DESKTOP_CHOICE="gnome"; break ;;
           2) DESKTOP_CHOICE="plasma"; break ;;
           3) DESKTOP_CHOICE="xfce"; break ;;
           4) DESKTOP_CHOICE="cinnamon"; break ;;
-          5) DESKTOP_CHOICE="i3"; break ;;
-          6) DESKTOP_CHOICE="sway"; break ;;
-          7) DESKTOP_CHOICE="none"; break ;;
+          5) DESKTOP_CHOICE="none"; break ;;
           *) echo "Invalid selection." ;;
         esac
       done
@@ -983,6 +1019,13 @@ select_desktop_environment() {
 }
 
 install_desktop_environment() {
+  if [[ "$DESKTOP_CHOICE" == "none" ]]; then
+    warn "Skipping desktop installation."
+    return
+  fi
+
+  run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} archlinux-wallpaper"
+
   case "$DESKTOP_CHOICE" in
     gnome)
       run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} gnome gnome-tweaks gdm"
@@ -1000,22 +1043,14 @@ install_desktop_environment() {
       run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} cinnamon lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings"
       run_in_chroot "systemctl enable lightdm"
       ;;
-    i3)
-      run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} i3-wm i3status i3lock dmenu rofi xorg-server xorg-xinit lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings"
-      run_in_chroot "systemctl enable lightdm"
-      ;;
-    sway)
-      run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} sway swaybg swayidle swaylock waybar xorg-server-xwayland alacritty xdg-desktop-portal-wlr gdm"
-      run_in_chroot "systemctl enable gdm"
-      ;;
-    none)
-      warn "Skipping desktop installation."
+    *)
+      warn "Unknown desktop selection '$DESKTOP_CHOICE'; skipping installation."
       ;;
   esac
 }
 
 install_gaming_stack() {
-  local packages=(steam lutris wine winetricks gamemode lib32-gamemode mangohud lib32-mangohud pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber flatpak)
+  local packages=(steam lutris "$WINE_PACKAGE" "$LIB32_WINE_PACKAGE" winetricks gamemode lib32-gamemode mangohud lib32-mangohud pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber flatpak)
   run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} ${packages[*]}"
   run_in_chroot "systemctl enable --global gamemoded.service >/dev/null 2>&1 || true"
   run_in_chroot "flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo"
@@ -1134,6 +1169,7 @@ main() {
   detect_timezone
   select_profile
   select_optional_extras
+  select_wine_variant
   select_boot_mode
   select_target_disk
   preflight_summary
