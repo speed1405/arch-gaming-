@@ -8,11 +8,49 @@ set -Eeuo pipefail
 
 REQUIRED_PACKAGES=(xorg-server xorg-apps xorg-xinit lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings \
   openbox obconf obmenu-generator nitrogen picom rofi lxappearance tint2 alacritty)
+PRIVILEGED_PREFIX=()
+
+get_privileged_prefix() {
+  PRIVILEGED_PREFIX=()
+  if [[ $EUID -eq 0 ]]; then
+    return 0
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    PRIVILEGED_PREFIX=(sudo)
+    return 0
+  fi
+  echo "sudo is not available; please rerun this script as root to continue."
+  return 1
+}
+
+enable_multilib() {
+  if grep -Eq '^[[:space:]]*\[multilib\]' /etc/pacman.conf; then
+    echo "Multilib repository already enabled."
+  else
+    echo "Enabling multilib repository in /etc/pacman.conf"
+    if ! get_privileged_prefix; then
+      echo "Unable to obtain elevated privileges; enable multilib manually."
+      return 1
+    fi
+    if grep -Eq '^[[:space:]]*#\s*\[multilib\]' /etc/pacman.conf; then
+      "${PRIVILEGED_PREFIX[@]}" sed -i 's/^\([[:space:]]*\)#\([[:space:]]*\[multilib\]\)/\1\2/' /etc/pacman.conf
+      "${PRIVILEGED_PREFIX[@]}" sed -i '/^[[:space:]]*\[multilib\]/,/^[[:space:]]*\[/{s/^\([[:space:]]*\)#\([[:space:]]*Include[[:space:]]*=\)/\1\2/}' /etc/pacman.conf
+    else
+      printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' | "${PRIVILEGED_PREFIX[@]}" tee -a /etc/pacman.conf >/dev/null
+    fi
+  fi
+
+  echo "Refreshing package databases (pacman -Sy)"
+  if ! get_privileged_prefix; then
+    echo "Unable to refresh package databases automatically; run pacman -Sy manually."
+    return 1
+  fi
+  "${PRIVILEGED_PREFIX[@]}" pacman -Sy
+}
 
 ensure_packages_installed() {
   local missing=()
   local pkg
-  local -a install_cmd
 
   for pkg in "${REQUIRED_PACKAGES[@]}"; do
     if ! pacman -Qi "$pkg" >/dev/null 2>&1; then
@@ -26,15 +64,11 @@ ensure_packages_installed() {
   fi
 
   echo "Installing prerequisite packages: ${missing[*]}"
-  if [[ $EUID -eq 0 ]]; then
-    install_cmd=(pacman -S --needed)
-  elif command -v sudo >/dev/null 2>&1; then
-    install_cmd=(sudo pacman -S --needed)
-  else
-    echo "sudo is not available; please install the following packages manually: ${missing[*]}"
+  if ! get_privileged_prefix; then
+    echo "Install the following packages manually: ${missing[*]}"
     return 1
   fi
-  "${install_cmd[@]}" "${missing[@]}"
+  "${PRIVILEGED_PREFIX[@]}" pacman -S --needed "${missing[@]}"
 }
 
 PAGE_CMD="cat"
@@ -55,6 +89,8 @@ show_section() {
 }
 
 run_tutorial() {
+  enable_multilib
+  pause
   ensure_packages_installed
   pause
 
@@ -64,7 +100,8 @@ run_tutorial() {
 
   show_section "Before You Begin" \
     "1. Boot into your Arch Linux system or chroot.
-  2. Ensure pacman mirrors are updated: sudo pacman -Syu" | $PAGE_CMD
+  2. Ensure pacman mirrors are updated: sudo pacman -Syu
+  3. This tutorial enables the multilib repository for 32-bit libraries automatically." | $PAGE_CMD
   pause
 
   show_section "Install Core Graphics Stack" \

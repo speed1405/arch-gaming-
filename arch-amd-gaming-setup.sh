@@ -86,6 +86,9 @@ Graphics stack:
   - AMD GPUs receive Mesa/Vulkan packages automatically.
   - NVIDIA GPUs trigger a dedicated helper script for proprietary drivers.
 
+Multilib repository:
+  - Enabled automatically so 32-bit libraries are available for Steam and Wine.
+
 Optional extras:
   - Streaming, emulation, creative, and system utility bundles can be toggled.
 
@@ -885,7 +888,31 @@ create_users() {
   run_in_chroot "sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers"
 }
 
+enable_host_multilib() {
+  local conf="/etc/pacman.conf"
+  local changed=0
+
+  if grep -Eq '^[[:space:]]*\[multilib\]' "$conf"; then
+    log "Host multilib repository already enabled."
+  else
+    if grep -Eq '^[[:space:]]*#\s*\[multilib\]' "$conf"; then
+      sed -i 's/^\([[:space:]]*\)#\([[:space:]]*\[multilib\]\)/\1\2/' "$conf"
+      sed -i '/^[[:space:]]*\[multilib\]/,/^[[:space:]]*\[/{s/^\([[:space:]]*\)#\([[:space:]]*Include[[:space:]]*=\)/\1\2/}' "$conf"
+    else
+      printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> "$conf"
+    fi
+    changed=1
+    log "Enabled multilib repository on host pacman.conf."
+  fi
+
+  if (( changed )); then
+    log "Refreshing host package databases (pacman -Sy)."
+    pacman -Sy
+  fi
+}
+
 enable_multilib() {
+  log "Enabling multilib repository inside target system."
   run_in_chroot "sed -i 's/^#\s*\[multilib\]/[multilib]/' /etc/pacman.conf"
   run_in_chroot "sed -i '/^[[:space:]]*\\[multilib\\]/,/^[[:space:]]*\\[/{/^[[:space:]]*Include[[:space:]]*=/{d}}' /etc/pacman.conf"
   run_in_chroot "sed -i '/^[[:space:]]*\\[multilib\\]/a Include = /etc/pacman.d/mirrorlist' /etc/pacman.conf"
@@ -1177,6 +1204,7 @@ main() {
   select_boot_mode
   select_target_disk
   preflight_summary
+  enable_host_multilib
   partition_disk
   format_partitions
   mount_partitions
