@@ -139,7 +139,7 @@ prompt() {
     whiptail)
       display="$prompt_text"
       if [[ -n "$help_text" ]]; then
-        display+=$'\n\n'"$help_text"
+        display=$(printf "%s\n\n%s" "$display" "$help_text")
       fi
       value=$(whiptail --title "$UI_TITLE" --inputbox "$display" 10 60 "$default_value" 3>&1 1>&2 2>&3)
       if [[ $? -ne 0 ]]; then
@@ -173,7 +173,7 @@ prompt_hidden() {
       whiptail)
         display="$prompt_text"
         if [[ -n "$help_text" ]]; then
-          display+=$'\n\n'"$help_text"
+          display=$(printf "%s\n\n%s" "$display" "$help_text")
         fi
         first=$(whiptail --title "$UI_TITLE" --passwordbox "$display" 10 60 3>&1 1>&2 2>&3)
         if [[ $? -ne 0 ]]; then
@@ -215,7 +215,7 @@ prompt_yes_no() {
     whiptail)
       display="$prompt_text"
       if [[ -n "$help_text" ]]; then
-        display+=$'\n\n'"$help_text"
+        display=$(printf "%s\n\n%s" "$display" "$help_text")
       fi
       local -a whiptail_args=(--title "$UI_TITLE" --yesno "$display" 12 70)
       case "$default_lower" in
@@ -380,10 +380,10 @@ apply_profile() {
   case "$profile" in
     gaming-gnome)
       PROFILE_NAME="Gaming desktop (GNOME)"
-      printf -v PROFILE_DESCRIPTION '%s\n%s\n%s' \
+      PROFILE_DESCRIPTION=$(printf '%s\n%s\n%s' \
         'Desktop: GNOME' \
         'Kernel: linux + linux-zen' \
-        'Notes: Great for dedicated gaming rigs with AMD graphics.'
+        'Notes: Great for dedicated gaming rigs with AMD graphics.')
       DESKTOP_CHOICE="gnome"
       TARGET_HOSTNAME="arch-gaming"
       INSTALL_LINUX_ZEN="yes"
@@ -392,10 +392,10 @@ apply_profile() {
       ;;
     performance-plasma)
       PROFILE_NAME="Performance desktop (Plasma)"
-      printf -v PROFILE_DESCRIPTION '%s\n%s\n%s' \
+      PROFILE_DESCRIPTION=$(printf '%s\n%s\n%s' \
         'Desktop: KDE Plasma' \
         'Kernel: linux + linux-zen + linux-cachyos' \
-        'Notes: Adds Gamescope and OpenXR/OpenVR runtimes for high-refresh rigs.'
+        'Notes: Adds Gamescope and OpenXR/OpenVR runtimes for high-refresh rigs.')
       DESKTOP_CHOICE="plasma"
       TARGET_HOSTNAME="arch-perf"
       INSTALL_LINUX_ZEN="yes"
@@ -405,10 +405,10 @@ apply_profile() {
       ;;
     lightweight-xfce)
       PROFILE_NAME="Lightweight laptop (Xfce)"
-      printf -v PROFILE_DESCRIPTION '%s\n%s\n%s' \
+      PROFILE_DESCRIPTION=$(printf '%s\n%s\n%s' \
         'Desktop: Xfce' \
         'Kernel: linux only' \
-        'Notes: Balanced defaults aimed at portable systems.'
+        'Notes: Balanced defaults aimed at portable systems.')
       DESKTOP_CHOICE="xfce"
       TARGET_HOSTNAME="arch-lite"
       INSTALL_LINUX_ZEN="no"
@@ -425,7 +425,8 @@ apply_profile() {
 }
 
 profile_summary() {
-  local summary=$'Active profile: '"$PROFILE_NAME"$'\n\n'"$PROFILE_DESCRIPTION"
+  local summary
+  summary=$(printf 'Active profile: %s\n\n%s' "$PROFILE_NAME" "$PROFILE_DESCRIPTION")
   case "$UI_BACKEND" in
     whiptail)
       whiptail --title "$UI_TITLE" --msgbox "$summary" 18 70
@@ -603,27 +604,34 @@ preflight_summary() {
     profile_pkg_text="None"
   fi
 
-  summary=$'Pre-flight Summary\n\n'
-  summary+=$'Profile: '"$PROFILE_NAME"$'\n'
-  summary+=$'Target disk: '"$TARGET_DISK"$'\n'
-  summary+=$'Boot mode: '"${BOOT_MODE^^}"$'\n'
-  summary+="${desktop_info}"$'\n'
-  summary+=$'Kernel plan:\n'
-  summary+=$'  - linux-zen: '"$zen_plan"$'\n'
-  summary+=$'  - linux-cachyos: '"$cachyos_plan"$'\n'
-  summary+=$'Hardware summary:\n'
-  summary+=$'  - CPU: '"$DETECTED_CPU"$'\n'
-  summary+=$'  - GPU: '"$DETECTED_GPU"$'\n'
-  summary+=$'  - RAM: '"$DETECTED_RAM_GB"$'\n'
-  summary+=$'  - Network: '"$DETECTED_NETWORK"$'\n'
-  summary+=$'  - Detected timezone: '"$DETECTED_TIMEZONE"$'\n'
-  summary+=$'  - GPU driver plan: '"$gpu_plan"$'\n'
-  summary+=$'Hostname (current default): '"$TARGET_HOSTNAME"$'\n'
-  summary+=$'Primary user (current default): '"$TARGET_USERNAME"$'\n'
-  summary+=$'Mount point: '"$TARGET_MOUNT"$'\n\n'
-  summary+=$'Optional extras: '"$extras_text"$'\n\n'
-  summary+=$'Profile-specific packages: '"$profile_pkg_text"$'\n\n'
-  summary+=$'No changes have been made yet. This is the final confirmation before wiping and partitioning the selected disk.'
+  summary=$(cat <<EOF
+Pre-flight Summary
+
+Profile: $PROFILE_NAME
+Target disk: $TARGET_DISK
+Boot mode: ${BOOT_MODE^^}
+$desktop_info
+Kernel plan:
+  - linux-zen: $zen_plan
+  - linux-cachyos: $cachyos_plan
+Hardware summary:
+  - CPU: $DETECTED_CPU
+  - GPU: $DETECTED_GPU
+  - RAM: $DETECTED_RAM_GB
+  - Network: $DETECTED_NETWORK
+  - Detected timezone: $DETECTED_TIMEZONE
+  - GPU driver plan: $gpu_plan
+Hostname (current default): $TARGET_HOSTNAME
+Primary user (current default): $TARGET_USERNAME
+Mount point: $TARGET_MOUNT
+
+Optional extras: $extras_text
+
+Profile-specific packages: $profile_pkg_text
+
+No changes have been made yet. This is the final confirmation before wiping and partitioning the selected disk.
+EOF
+  )
 
   case "$UI_BACKEND" in
     whiptail)
