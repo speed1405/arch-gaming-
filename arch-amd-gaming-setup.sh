@@ -587,7 +587,7 @@ select_wine_variant() {
     wine-staging)
       WINE_PACKAGE="wine-staging"
       WINE_VARIANT_LABEL="Wine-Staging"
-      LIB32_WINE_PACKAGE="lib32-wine-staging"
+      LIB32_WINE_PACKAGE="lib32-wine"
       ;;
     *)
       WINE_PACKAGE="wine"
@@ -595,7 +595,11 @@ select_wine_variant() {
       LIB32_WINE_PACKAGE="lib32-wine"
       ;;
   esac
-
+  if [[ $selection == "wine-staging" ]]; then
+    log "Wine variant selected: $WINE_VARIANT_LABEL (32-bit support provided by lib32-wine)"
+  else
+    log "Wine variant selected: $WINE_VARIANT_LABEL"
+  fi
   log "Wine variant selected: $WINE_VARIANT_LABEL"
 }
 
