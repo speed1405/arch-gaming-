@@ -380,10 +380,12 @@ apply_profile() {
   case "$profile" in
     gaming-gnome)
       PROFILE_NAME="Gaming desktop (GNOME)"
-      PROFILE_DESCRIPTION=$(printf '%s\n%s\n%s' \
-        'Desktop: GNOME' \
-        'Kernel: linux + linux-zen' \
-        'Notes: Great for dedicated gaming rigs with AMD graphics.')
+      PROFILE_DESCRIPTION=$(cat <<'DESC'
+Desktop: GNOME
+Kernel: linux + linux-zen
+Notes: Great for dedicated gaming rigs with AMD graphics.
+DESC
+      )
       DESKTOP_CHOICE="gnome"
       TARGET_HOSTNAME="arch-gaming"
       INSTALL_LINUX_ZEN="yes"
@@ -392,10 +394,12 @@ apply_profile() {
       ;;
     performance-plasma)
       PROFILE_NAME="Performance desktop (Plasma)"
-      PROFILE_DESCRIPTION=$(printf '%s\n%s\n%s' \
-        'Desktop: KDE Plasma' \
-        'Kernel: linux + linux-zen + linux-cachyos' \
-        'Notes: Adds Gamescope and OpenXR/OpenVR runtimes for high-refresh rigs.')
+      PROFILE_DESCRIPTION=$(cat <<'DESC'
+Desktop: KDE Plasma
+Kernel: linux + linux-zen + linux-cachyos
+Notes: Adds Gamescope and OpenXR/OpenVR runtimes for high-refresh rigs.
+DESC
+      )
       DESKTOP_CHOICE="plasma"
       TARGET_HOSTNAME="arch-perf"
       INSTALL_LINUX_ZEN="yes"
@@ -405,10 +409,12 @@ apply_profile() {
       ;;
     lightweight-xfce)
       PROFILE_NAME="Lightweight laptop (Xfce)"
-      PROFILE_DESCRIPTION=$(printf '%s\n%s\n%s' \
-        'Desktop: Xfce' \
-        'Kernel: linux only' \
-        'Notes: Balanced defaults aimed at portable systems.')
+      PROFILE_DESCRIPTION=$(cat <<'DESC'
+Desktop: Xfce
+Kernel: linux only
+Notes: Balanced defaults aimed at portable systems.
+DESC
+      )
       DESKTOP_CHOICE="xfce"
       TARGET_HOSTNAME="arch-lite"
       INSTALL_LINUX_ZEN="no"
