@@ -257,19 +257,17 @@ detect_hardware() {
   fi
   [[ -n "$DETECTED_GPU" ]] || DETECTED_GPU="Unknown GPU"
 
-  shopt -s nocasematch
-  case "$DETECTED_GPU" in
+  case "${DETECTED_GPU,,}" in
     *nvidia*|*0x10de*)
       DETECTED_GPU_VENDOR="nvidia"
       ;;
-    *amd*|*advanced micro devices*|*ati*|*radeon*|*0x1002*|*0x1022*)
+    *amd*|*advanced\ micro\ devices*|*ati*|*radeon*|*0x1002*|*0x1022*)
       DETECTED_GPU_VENDOR="amd"
       ;;
     *)
       DETECTED_GPU_VENDOR="unknown"
       ;;
   esac
-  shopt -u nocasematch
 
   if [[ -f /proc/meminfo ]]; then
     local mem_kb
