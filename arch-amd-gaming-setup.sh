@@ -46,6 +46,8 @@ DETECTED_NETWORK="Unknown"
 HAS_NETWORK=0
 EXTRA_PACKAGES=()
 SELECTED_EXTRA_LABELS=()
+PROFILE_PACKAGES=()
+DETECTED_GPU_VENDOR="unknown"
 
 log() { printf '[+] %s\n' "$1"; }
 warn() { printf '[!] %s\n' "$1" >&2; }
@@ -59,7 +61,7 @@ init_ui() {
 }
 
 show_help_section() {
-  local help_text=$'Installer Help\n\nProfiles:\n  - Guided setup: manual prompts for every decision.\n  - Gaming desktop: GNOME + linux-zen tuned for dedicated rigs.\n  - Lightweight laptop: Xfce with defaults geared for portability.\n\nKernel options:\n  - linux-zen: low-latency kernel that improves gaming responsiveness.\n  - linux-cachyos: AUR build with extra desktop optimisations (longer install).\n\nDesktops & window managers:\n  - GNOME / Plasma / Xfce / Cinnamon provide full-featured desktops.\n  - i3 / Sway offer lightweight tiling window managers.\n\nOptional extras:\n  - Streaming, emulation, creative, and system utility bundles can be toggled.\n\nDisks & partitioning:\n  - The selected disk is fully wiped and repartitioned.\n  - The pre-flight summary lets you review choices before changes occur.\n\nNavigation tips:\n  - Whiptail dialogs: arrow keys move, Tab switches buttons, Enter confirms.\n  - Text mode: type responses exactly as shown (yes/no, option names).'
+  local help_text=$'Installer Help\n\nProfiles:\n  - Guided setup: manual prompts for every decision.\n  - Gaming desktop: GNOME + linux-zen tuned for dedicated rigs.\n  - Performance desktop: Plasma + linux-zen + CachyOS with Gamescope/VR extras.\n  - Lightweight laptop: Xfce with defaults geared for portability.\n\nKernel options:\n  - linux-zen: low-latency kernel that improves gaming responsiveness.\n  - linux-cachyos: AUR build with extra desktop optimisations (longer install).\n\nDesktops & window managers:\n  - GNOME / Plasma / Xfce / Cinnamon provide full-featured desktops.\n  - i3 / Sway offer lightweight tiling window managers.\n\nGraphics stack:\n  - AMD GPUs receive Mesa/Vulkan packages automatically.\n  - NVIDIA GPUs trigger a dedicated helper script for proprietary drivers.\n\nOptional extras:\n  - Streaming, emulation, creative, and system utility bundles can be toggled.\n\nDisks & partitioning:\n  - The selected disk is fully wiped and repartitioned.\n  - The pre-flight summary lets you review choices before changes occur.\n\nNavigation tips:\n  - Whiptail dialogs: arrow keys move, Tab switches buttons, Enter confirms.\n  - Text mode: type responses exactly as shown (yes/no, option names).'
 
   case "$UI_BACKEND" in
     whiptail)
@@ -254,6 +256,19 @@ detect_hardware() {
   fi
   [[ -n "$DETECTED_GPU" ]] || DETECTED_GPU="Unknown GPU"
 
+  local gpu_lower=${DETECTED_GPU,,}
+  case "$gpu_lower" in
+    *nvidia*|*0x10de*)
+      DETECTED_GPU_VENDOR="nvidia"
+      ;;
+    *amd*|*advanced micro devices*|*ati*|*radeon*|*0x1002*|*0x1022*)
+      DETECTED_GPU_VENDOR="amd"
+      ;;
+    *)
+      DETECTED_GPU_VENDOR="unknown"
+      ;;
+  esac
+
   if [[ -f /proc/meminfo ]]; then
     local mem_kb
     mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
@@ -288,6 +303,7 @@ apply_profile() {
   SKIP_DESKTOP_PROMPT=0
   INSTALL_LINUX_ZEN="ask"
   INSTALL_LINUX_CACHYOS="ask"
+  PROFILE_PACKAGES=()
   case "$profile" in
     gaming-gnome)
       PROFILE_NAME="Gaming desktop (GNOME)"
@@ -296,6 +312,16 @@ apply_profile() {
       TARGET_HOSTNAME="arch-gaming"
       INSTALL_LINUX_ZEN="yes"
       INSTALL_LINUX_CACHYOS="no"
+      SKIP_DESKTOP_PROMPT=1
+      ;;
+    performance-plasma)
+      PROFILE_NAME="Performance desktop (Plasma)"
+      PROFILE_DESCRIPTION=$'Desktop: KDE Plasma\nKernel: linux + linux-zen + linux-cachyos\nNotes: Adds Gamescope and OpenXR/OpenVR runtimes for high-refresh rigs.'
+      DESKTOP_CHOICE="plasma"
+      TARGET_HOSTNAME="arch-perf"
+      INSTALL_LINUX_ZEN="yes"
+      INSTALL_LINUX_CACHYOS="yes"
+      PROFILE_PACKAGES=("gamescope" "openxr" "openvr" "monado")
       SKIP_DESKTOP_PROMPT=1
       ;;
     lightweight-xfce)
@@ -332,9 +358,10 @@ select_profile() {
   local selection choice
   case "$UI_BACKEND" in
     whiptail)
-      selection=$(whiptail --title "$UI_TITLE" --menu "Choose a starting profile" 20 70 6 \
+      selection=$(whiptail --title "$UI_TITLE" --menu "Choose a starting profile" 20 70 7 \
         "custom" "Guided setup (choose each option)" \
         "gaming-gnome" "Gaming desktop (GNOME + linux-zen)" \
+        "performance-plasma" "Performance desktop (Plasma + zen + CachyOS)" \
         "lightweight-xfce" "Lightweight laptop (Xfce)" 3>&1 1>&2 2>&3)
       if [[ $? -ne 0 || -z "$selection" ]]; then
         selection="custom"
@@ -344,11 +371,13 @@ select_profile() {
       echo "Setup profiles:"
       echo "  1) Guided setup (choose each option)."
       echo "  2) Gaming desktop (GNOME + linux-zen)."
-      echo "  3) Lightweight laptop (Xfce)."
-      read -r -p "Select profile [1-3]: " choice
+      echo "  3) Performance desktop (Plasma + zen + CachyOS)."
+      echo "  4) Lightweight laptop (Xfce)."
+      read -r -p "Select profile [1-4]: " choice
       case "$choice" in
         2) selection="gaming-gnome" ;;
-        3) selection="lightweight-xfce" ;;
+        3) selection="performance-plasma" ;;
+        4) selection="lightweight-xfce" ;;
         *) selection="custom" ;;
       esac
       ;;
@@ -448,7 +477,7 @@ select_optional_extras() {
 }
 
 preflight_summary() {
-  local desktop_info zen_plan cachyos_plan summary extras_text
+  local desktop_info zen_plan cachyos_plan summary extras_text profile_pkg_text gpu_plan
 
   if (( SKIP_DESKTOP_PROMPT )); then
     desktop_info="Desktop/WM: ${DESKTOP_CHOICE} (from profile)"
@@ -468,13 +497,28 @@ preflight_summary() {
     *) cachyos_plan="Ask during install (default: No)" ;;
   esac
 
+  case "$DETECTED_GPU_VENDOR" in
+    amd) gpu_plan="Install AMD Mesa/Vulkan stack" ;;
+    nvidia) gpu_plan="Run NVIDIA helper" ;;
+    *) gpu_plan="Skip automatic GPU driver setup" ;;
+  esac
+
   if ((${#SELECTED_EXTRA_LABELS[@]})); then
-    local joined
-    local IFS=', '
-    joined="${SELECTED_EXTRA_LABELS[*]}"
-    extras_text="$joined"
+    extras_text=$( (
+      IFS=', '
+      printf '%s' "${SELECTED_EXTRA_LABELS[*]}"
+    ))
   else
     extras_text="None"
+  fi
+
+  if ((${#PROFILE_PACKAGES[@]})); then
+    profile_pkg_text=$( (
+      IFS=', '
+      printf '%s' "${PROFILE_PACKAGES[*]}"
+    ))
+  else
+    profile_pkg_text="None"
   fi
 
   summary=$'Pre-flight Summary\n\n'
@@ -490,10 +534,12 @@ preflight_summary() {
   summary+=$'  - GPU: '"$DETECTED_GPU"$'\n'
   summary+=$'  - RAM: '"$DETECTED_RAM_GB"$'\n'
   summary+=$'  - Network: '"$DETECTED_NETWORK"$'\n'
+  summary+=$'  - GPU driver plan: '"$gpu_plan"$'\n'
   summary+=$'Hostname (current default): '"$TARGET_HOSTNAME"$'\n'
   summary+=$'Primary user (current default): '"$TARGET_USERNAME"$'\n'
   summary+=$'Mount point: '"$TARGET_MOUNT"$'\n\n'
   summary+=$'Optional extras: '"$extras_text"$'\n\n'
+  summary+=$'Profile-specific packages: '"$profile_pkg_text"$'\n\n'
   summary+=$'No changes have been made yet. This is the final confirmation before wiping and partitioning the selected disk.'
 
   case "$UI_BACKEND" in
@@ -711,6 +757,47 @@ install_amd_stack() {
   run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} ${packages[*]}"
 }
 
+install_nvidia_stack() {
+  local helper_source helper_target helper_dir flags_str
+  helper_source=$(cd "$(dirname "$0")" && pwd)/install-nvidia-stack.sh
+  if [[ ! -f "$helper_source" ]]; then
+    warn "NVIDIA helper script not found; skipping NVIDIA driver installation."
+    return
+  fi
+
+  helper_dir="$TARGET_MOUNT/usr/local/bin"
+  helper_target="$helper_dir/install-nvidia-stack.sh"
+  mkdir -p "$helper_dir"
+  cp "$helper_source" "$helper_target"
+  chmod +x "$helper_target"
+
+  log "Running NVIDIA helper inside chroot."
+  printf -v flags_str '%s ' "${PACMAN_FLAGS[@]}"
+  flags_str=${flags_str%% }
+  if [[ -n "$flags_str" ]]; then
+    run_in_chroot "PACMAN_FLAGS='$flags_str' /usr/local/bin/install-nvidia-stack.sh"
+  else
+    run_in_chroot "/usr/local/bin/install-nvidia-stack.sh"
+  fi
+  run_in_chroot "rm -f /usr/local/bin/install-nvidia-stack.sh"
+}
+
+install_gpu_stack() {
+  case "$DETECTED_GPU_VENDOR" in
+    nvidia)
+      log "Detected NVIDIA GPU. Delegating driver setup."
+      install_nvidia_stack
+      ;;
+    amd)
+      log "Detected AMD GPU. Installing Mesa/Vulkan stack."
+      install_amd_stack
+      ;;
+    *)
+      warn "Unknown GPU vendor; skipping vendor-specific driver installation."
+      ;;
+  esac
+}
+
 install_kernel_options() {
   case "$INSTALL_LINUX_ZEN" in
     yes)
@@ -849,6 +936,14 @@ install_optional_extras() {
   run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} ${EXTRA_PACKAGES[*]}"
 }
 
+install_profile_packages() {
+  if ((${#PROFILE_PACKAGES[@]} == 0)); then
+    return
+  fi
+  log "Installing profile-specific packages: ${PROFILE_PACKAGES[*]}"
+  run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} ${PROFILE_PACKAGES[*]}"
+}
+
 install_aur_helper() {
   if ! prompt_yes_no "Install AUR helper ($AUR_HELPER)?" "y" "Installs $AUR_HELPER for managing packages from the AUR."; then
     log "Skipping AUR helper installation."
@@ -897,7 +992,10 @@ install_protonup_and_heroic() {
 
   if run_in_chroot "command -v $AUR_HELPER >/dev/null 2>&1"; then
     log "Using $AUR_HELPER to install ${aur_targets[*]} from the AUR."
+    run_in_chroot 'bash -c "echo \"%wheel ALL=(ALL:ALL) NOPASSWD: ALL\" > /etc/sudoers.d/00-aur-installer"'
+    run_in_chroot "chmod 440 /etc/sudoers.d/00-aur-installer"
     run_in_chroot "su - $TARGET_USERNAME -c '$AUR_HELPER -S --noconfirm ${aur_targets[*]}'"
+    run_in_chroot "rm -f /etc/sudoers.d/00-aur-installer"
     return
   fi
 
@@ -954,9 +1052,10 @@ main() {
   create_users
   enable_multilib
   install_kernel_options
-  install_amd_stack
+  install_gpu_stack
   install_gaming_stack
   install_optional_extras
+  install_profile_packages
   select_desktop_environment
   install_desktop_environment
   install_aur_helper
