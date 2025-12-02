@@ -257,9 +257,8 @@ detect_hardware() {
   fi
   [[ -n "$DETECTED_GPU" ]] || DETECTED_GPU="Unknown GPU"
 
-  local gpu_lower
-  gpu_lower=$(printf '%s' "$DETECTED_GPU" | awk '{print tolower($0)}')
-  case "$gpu_lower" in
+  shopt -s nocasematch
+  case "$DETECTED_GPU" in
     *nvidia*|*0x10de*)
       DETECTED_GPU_VENDOR="nvidia"
       ;;
@@ -270,6 +269,7 @@ detect_hardware() {
       DETECTED_GPU_VENDOR="unknown"
       ;;
   esac
+  shopt -u nocasematch
 
   if [[ -f /proc/meminfo ]]; then
     local mem_kb
