@@ -258,7 +258,7 @@ detect_hardware() {
   [[ -n "$DETECTED_GPU" ]] || DETECTED_GPU="Unknown GPU"
 
   local gpu_lower
-  gpu_lower=$(printf '%s' "$DETECTED_GPU" | tr '[:upper:]' '[:lower:]')
+  gpu_lower=$(printf '%s' "$DETECTED_GPU" | awk '{print tolower($0)}')
   case "$gpu_lower" in
     *nvidia*|*0x10de*)
       DETECTED_GPU_VENDOR="nvidia"
