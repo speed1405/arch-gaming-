@@ -357,8 +357,10 @@ detect_timezone() {
     fi
   fi
 
-  if [[ -z "$tz" && -n "$HAS_NETWORK" && $HAS_NETWORK -eq 1 && command -v curl >/dev/null 2>&1 ]]; then
-    tz=$(curl -fsSL --max-time 2 https://ipapi.co/timezone 2>/dev/null || true)
+  if [[ -z "$tz" && -n "$HAS_NETWORK" && $HAS_NETWORK -eq 1 ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      tz=$(curl -fsSL --max-time 2 https://ipapi.co/timezone 2>/dev/null || true)
+    fi
   fi
 
   if [[ -n "$tz" ]]; then
