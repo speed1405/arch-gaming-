@@ -389,11 +389,12 @@ select_optional_extras() {
     echo "  2) Emulation & retro gaming (RetroArch, Dolphin, PCSX2)"
     echo "  3) Creative tools (Blender, GIMP, Inkscape)"
     echo "  4) System utilities (htop, btop, fastfetch)"
-    local input
-    read -r -p "Select numbers separated by spaces (Enter to skip): " input
-    read -ra input <<< "$input"
+    local input_line
+    read -r -p "Select numbers separated by spaces (Enter to skip): " input_line
+    local -a input_choices=()
+    read -ra input_choices <<< "$input_line"
     local choice
-    for choice in "${input[@]}"; do
+    for choice in "${input_choices[@]}"; do
       case "$choice" in
         1|streaming) selected_tags+=("streaming") ;;
         2|emulation) selected_tags+=("emulation") ;;
@@ -412,7 +413,7 @@ select_optional_extras() {
   local -A seen_tags=()
   local tag
   for tag in "${selected_tags[@]}"; do
-    tag=${tag//"}
+    tag=${tag//\"/}
     [[ -z "$tag" ]] && continue
     if [[ -z ${seen_tags[$tag]:-} ]]; then
       seen_tags[$tag]=1
