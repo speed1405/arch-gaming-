@@ -39,6 +39,13 @@ PROFILE_DESCRIPTION="Manual walkthrough where you review every setting."
 INSTALL_LINUX_ZEN="ask"
 INSTALL_LINUX_CACHYOS="ask"
 SKIP_DESKTOP_PROMPT=0
+DETECTED_CPU="Unknown"
+DETECTED_GPU="Unknown"
+DETECTED_RAM_GB="Unknown"
+DETECTED_NETWORK="Unknown"
+HAS_NETWORK=0
+EXTRA_PACKAGES=()
+SELECTED_EXTRA_LABELS=()
 
 log() { printf '[+] %s\n' "$1"; }
 warn() { printf '[!] %s\n' "$1" >&2; }
@@ -49,6 +56,20 @@ init_ui() {
   if command -v whiptail >/dev/null 2>&1; then
     UI_BACKEND="whiptail"
   fi
+}
+
+show_help_section() {
+  local help_text=$'Installer Help\n\nProfiles:\n  - Guided setup: manual prompts for every decision.\n  - Gaming desktop: GNOME + linux-zen tuned for dedicated rigs.\n  - Lightweight laptop: Xfce with defaults geared for portability.\n\nKernel options:\n  - linux-zen: low-latency kernel that improves gaming responsiveness.\n  - linux-cachyos: AUR build with extra desktop optimisations (longer install).\n\nDesktops & window managers:\n  - GNOME / Plasma / Xfce / Cinnamon provide full-featured desktops.\n  - i3 / Sway offer lightweight tiling window managers.\n\nOptional extras:\n  - Streaming, emulation, creative, and system utility bundles can be toggled.\n\nDisks & partitioning:\n  - The selected disk is fully wiped and repartitioned.\n  - The pre-flight summary lets you review choices before changes occur.\n\nNavigation tips:\n  - Whiptail dialogs: arrow keys move, Tab switches buttons, Enter confirms.\n  - Text mode: type responses exactly as shown (yes/no, option names).'
+
+  case "$UI_BACKEND" in
+    whiptail)
+      whiptail --title "$UI_TITLE" --msgbox "$help_text" 22 74
+      ;;
+    *)
+      printf '%s\n\n' "$help_text"
+      read -r -p "Press Enter to continue..." _
+      ;;
+  esac
 }
 
 show_quick_start_guide() {
@@ -135,11 +156,12 @@ prompt_hidden() {
   done
 }
 
-prompt_yes_no() {
-  local prompt_text="$1"
-  local default_answer="${2:-y}"
+        local input_line
+        read -r -p "Select numbers separated by spaces (Enter to skip): " input_line
+        local -a input_choices=()
+        read -ra input_choices <<< "$input_line"
   local help_text="${3:-}"
-  local choice default_lower display suffix
+        for choice in "${input_choices[@]}"; do
   default_lower="${default_answer,,}"
   case "$UI_BACKEND" in
     whiptail)
@@ -205,6 +227,57 @@ detect_missing_requirements() {
   if [[ $UI_BACKEND == "text" ]]; then
     warn "Install 'dialog' (pacman -Sy dialog) to enable whiptail-based menus. Continuing with plain text prompts."
   fi
+}
+
+detect_hardware() {
+  log "Detecting hardware..."
+
+  DETECTED_CPU="Unknown CPU"
+  DETECTED_GPU="Unknown GPU"
+  DETECTED_RAM_GB="Unknown"
+  DETECTED_NETWORK="No active link"
+  HAS_NETWORK=0
+
+  if command -v lscpu >/dev/null 2>&1; then
+    DETECTED_CPU=$(lscpu | awk -F: '/Model name/ {gsub(/^ +/,"",$2); print $2; exit}')
+  elif [[ -f /proc/cpuinfo ]]; then
+    DETECTED_CPU=$(awk -F: '/model name/ {gsub(/^ +/,"",$2); print $2; exit}' /proc/cpuinfo)
+  fi
+  [[ -n "$DETECTED_CPU" ]] || DETECTED_CPU="Unknown CPU"
+
+  if command -v lspci >/dev/null 2>&1; then
+    DETECTED_GPU=$(lspci | awk -F: '/VGA compatible controller|3D controller/ {gsub(/^ +/,"",$3); print $3; exit}')
+  elif [[ -d /sys/class/drm ]]; then
+    DETECTED_GPU=$(ls /sys/class/drm | grep -m1 '^card[0-9]*$' | xargs -I{} cat /sys/class/drm/{}/device/vendor 2>/dev/null || true)
+  fi
+  [[ -n "$DETECTED_GPU" ]] || DETECTED_GPU="Unknown GPU"
+
+  if [[ -f /proc/meminfo ]]; then
+    local mem_kb
+    mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    if [[ -n "$mem_kb" ]]; then
+      DETECTED_RAM_GB=$(( (mem_kb + 524288) / 1048576 ))
+      DETECTED_RAM_GB="${DETECTED_RAM_GB} GB"
+    fi
+  fi
+  [[ -n "$DETECTED_RAM_GB" ]] || DETECTED_RAM_GB="Unknown"
+
+  if command -v nmcli >/dev/null 2>&1; then
+    if nmcli networking connectivity >/dev/null 2>&1; then
+      DETECTED_NETWORK="NetworkManager"
+      HAS_NETWORK=1
+    fi
+  elif command -v ip >/dev/null 2>&1; then
+    if ip route get 1.1.1.1 >/dev/null 2>&1; then
+      DETECTED_NETWORK="Active route"
+      HAS_NETWORK=1
+    fi
+  fi
+
+  log "Detected CPU: $DETECTED_CPU"
+  log "Detected GPU: $DETECTED_GPU"
+  log "Detected RAM: $DETECTED_RAM_GB"
+  log "Network status: $DETECTED_NETWORK"
 }
 
 apply_profile() {
@@ -285,6 +358,152 @@ select_profile() {
     log "Applied profile: $PROFILE_NAME (defaults pre-filled; you can adjust prompts as needed)."
   else
     log "Guided setup selected."
+  fi
+}
+
+select_optional_extras() {
+  SELECTED_EXTRA_LABELS=()
+  EXTRA_PACKAGES=()
+
+  if ! prompt_yes_no "Choose optional extras to install?" "y" "Extras include streaming, emulation, creative, and system tool bundles."; then
+    log "Skipping optional extras selection."
+    return
+  fi
+
+  local -a selected_tags=()
+  if [[ $UI_BACKEND == "whiptail" ]]; then
+    local selection
+    selection=$(whiptail --title "$UI_TITLE" --checklist "Select optional extras (use Space to toggle)" 20 80 8 \
+      "streaming" "Streaming & recording (OBS Studio, EasyEffects)" OFF \
+      "emulation" "Emulation & retro gaming (RetroArch, Dolphin, PCSX2)" OFF \
+      "creative" "Creative tools (Blender, GIMP, Inkscape)" OFF \
+      "sysutils" "System utilities (htop, btop, nvtop)" OFF 3>&1 1>&2 2>&3)
+    if [[ $? -eq 0 && -n $selection ]]; then
+      read -ra selected_tags <<< "$selection"
+    fi
+  else
+    echo "Optional extras:"
+    echo "  1) Streaming & recording (OBS Studio, EasyEffects)"
+    echo "  2) Emulation & retro gaming (RetroArch, Dolphin, PCSX2)"
+    echo "  3) Creative tools (Blender, GIMP, Inkscape)"
+    echo "  4) System utilities (htop, btop, nvtop)"
+    local input
+    read -r -p "Select numbers separated by spaces (Enter to skip): " input
+    read -ra input <<< "$input"
+    local choice
+    for choice in "${input[@]}"; do
+      case "$choice" in
+        1|streaming) selected_tags+=("streaming") ;;
+        2|emulation) selected_tags+=("emulation") ;;
+        3|creative) selected_tags+=("creative") ;;
+        4|sysutils) selected_tags+=("sysutils") ;;
+      esac
+    done
+  fi
+
+  if ((${#selected_tags[@]} == 0)); then
+    log "No optional extras selected."
+    return
+  fi
+
+  local -a unique_tags=()
+  local -A seen_tags=()
+  local tag
+  for tag in "${selected_tags[@]}"; do
+    tag=${tag//"}
+    [[ -z "$tag" ]] && continue
+    if [[ -z ${seen_tags[$tag]:-} ]]; then
+      seen_tags[$tag]=1
+      unique_tags+=("$tag")
+    fi
+  done
+
+  selected_tags=("${unique_tags[@]}")
+
+  for tag in "${selected_tags[@]}"; do
+    case "$tag" in
+      streaming)
+        SELECTED_EXTRA_LABELS+=("Streaming & recording")
+        EXTRA_PACKAGES+=("obs-studio" "easyeffects")
+        ;;
+      emulation)
+        SELECTED_EXTRA_LABELS+=("Emulation & retro gaming")
+        EXTRA_PACKAGES+=("retroarch" "dolphin-emu" "pcsx2")
+        ;;
+      creative)
+        SELECTED_EXTRA_LABELS+=("Creative tools")
+        EXTRA_PACKAGES+=("blender" "gimp" "inkscape")
+        ;;
+      sysutils)
+        SELECTED_EXTRA_LABELS+=("System utilities")
+        EXTRA_PACKAGES+=("htop" "btop" "fastfetch")
+        ;;
+    esac
+  done
+
+  log "Selected extras: ${SELECTED_EXTRA_LABELS[*]}"
+}
+
+preflight_summary() {
+  local desktop_info zen_plan cachyos_plan summary extras_text
+
+  if (( SKIP_DESKTOP_PROMPT )); then
+    desktop_info="Desktop/WM: ${DESKTOP_CHOICE} (from profile)"
+  else
+    desktop_info="Desktop/WM: Will prompt later (current default: ${DESKTOP_CHOICE})"
+  fi
+
+  case "$INSTALL_LINUX_ZEN" in
+    yes) zen_plan="Install (profile default)" ;;
+    no) zen_plan="Skip (profile default)" ;;
+    *) zen_plan="Ask during install (default: Yes)" ;;
+  esac
+
+  case "$INSTALL_LINUX_CACHYOS" in
+    yes) cachyos_plan="Install (profile default)" ;;
+    no) cachyos_plan="Skip (profile default)" ;;
+    *) cachyos_plan="Ask during install (default: No)" ;;
+  esac
+
+  if ((${#SELECTED_EXTRA_LABELS[@]})); then
+    local joined
+    local IFS=', '
+    joined="${SELECTED_EXTRA_LABELS[*]}"
+    extras_text="$joined"
+  else
+    extras_text="None"
+  fi
+
+  summary=$'Pre-flight Summary\n\n'
+  summary+=$'Profile: '"$PROFILE_NAME"$'\n'
+  summary+=$'Target disk: '"$TARGET_DISK"$'\n'
+  summary+=$'Boot mode: '"${BOOT_MODE^^}"$'\n'
+  summary+="${desktop_info}"$'\n'
+  summary+=$'Kernel plan:\n'
+  summary+=$'  - linux-zen: '"$zen_plan"$'\n'
+  summary+=$'  - linux-cachyos: '"$cachyos_plan"$'\n'
+  summary+=$'Hardware summary:\n'
+  summary+=$'  - CPU: '"$DETECTED_CPU"$'\n'
+  summary+=$'  - GPU: '"$DETECTED_GPU"$'\n'
+  summary+=$'  - RAM: '"$DETECTED_RAM_GB"$'\n'
+  summary+=$'  - Network: '"$DETECTED_NETWORK"$'\n'
+  summary+=$'Hostname (current default): '"$TARGET_HOSTNAME"$'\n'
+  summary+=$'Primary user (current default): '"$TARGET_USERNAME"$'\n'
+  summary+=$'Mount point: '"$TARGET_MOUNT"$'\n\n'
+  summary+=$'Optional extras: '"$extras_text"$'\n\n'
+  summary+=$'No changes have been made yet. This is the final confirmation before wiping and partitioning the selected disk.'
+
+  case "$UI_BACKEND" in
+    whiptail)
+      whiptail --title "$UI_TITLE" --msgbox "$summary" 20 70
+      ;;
+    *)
+      printf '%s\n' "$summary"
+      ;;
+  esac
+
+  if ! prompt_yes_no "Proceed with disk partitioning and installation?" "y" "Choose No to adjust settings or exit before any changes are made."; then
+    err "Installation cancelled before making any changes."
   fi
 }
 
@@ -618,6 +837,15 @@ install_gaming_stack() {
   run_in_chroot "flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo"
 }
 
+install_optional_extras() {
+  if ((${#EXTRA_PACKAGES[@]} == 0)); then
+    log "No optional extras selected for installation."
+    return
+  fi
+  log "Installing optional extras: ${SELECTED_EXTRA_LABELS[*]}"
+  run_in_chroot "pacman -S ${PACMAN_FLAGS[*]} ${EXTRA_PACKAGES[*]}"
+}
+
 install_aur_helper() {
   if ! prompt_yes_no "Install AUR helper ($AUR_HELPER) and ProtonUp-Qt?" "y" "Installs $AUR_HELPER along with ProtonUp-Qt and Heroic from the AUR."; then
     return
@@ -653,10 +881,16 @@ main() {
   if prompt_yes_no "View the quick start guide before continuing?" "y" "Great for first-time runs; you can skip if you're already familiar."; then
     show_quick_start_guide
   fi
+  if prompt_yes_no "Open the installer help overview?" "y" "Covers profiles, kernels, desktops, and navigation tips."; then
+    show_help_section
+  fi
   check_environment
+  detect_hardware
   select_profile
+  select_optional_extras
   select_boot_mode
   select_target_disk
+  preflight_summary
   partition_disk
   format_partitions
   mount_partitions
@@ -669,6 +903,7 @@ main() {
   install_kernel_options
   install_amd_stack
   install_gaming_stack
+  install_optional_extras
   select_desktop_environment
   install_desktop_environment
   install_aur_helper
